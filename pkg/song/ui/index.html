@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>song — static file manager</title>
+<link rel="stylesheet" href="/admin/style.css">
+</head>
+<body>
+<header class="topbar">
+	<div class="brand">
+		<h1>song</h1>
+		<span class="tagline">static hosting · server-side rendering · silos</span>
+	</div>
+	<div class="top-actions">
+		<span id="status" class="status"></span>
+		<a href="/health" class="link" target="_blank" rel="noopener">health</a>
+		<a href="/admin/" class="link">reload</a>
+	</div>
+</header>
+
+<main>
+	<nav class="tabs">
+		<button class="tab active" data-tab="files">Files</button>
+		<button class="tab" data-tab="templates">Templates &amp; SSR</button>
+		<button class="tab" data-tab="meta">Silo config</button>
+		<button class="tab" data-tab="upload">Upload</button>
+		<button class="tab" data-tab="api">API</button>
+	</nav>
+
+	<section class="silo-bar">
+		<label for="silo-select">Silo</label>
+		<select id="silo-select"></select>
+		<form id="new-silo-form" class="inline-form">
+			<input type="text" id="new-silo-name" placeholder="new silo name" required>
+			<button type="submit" class="button">+ create</button>
+		</form>
+		<button id="delete-silo" class="button danger">delete silo</button>
+		<a id="open-site" class="button" target="_blank" rel="noopener">open site</a>
+	</section>
+
+	<!-- Files tab -->
+	<section id="tab-files" class="panel active">
+		<div class="row">
+			<div class="crumbs">
+				<button class="link" id="nav-up">↑ up</button>
+				<code id="current-path">/</code>
+			</div>
+			<button class="button" id="new-file-btn">+ new file</button>
+		</div>
+		<table class="files" id="file-table">
+			<thead><tr><th>name</th><th>size</th><th>type</th><th>encrypted</th><th>modified</th><th></th></tr></thead>
+			<tbody></tbody>
+		</table>
+		<form id="file-form" class="editor hidden">
+			<input type="hidden" id="file-path">
+			<input type="hidden" id="file-mode">
+			<div class="row">
+				<label>Path <input type="text" id="file-path-input" placeholder="css/app.css" required></label>
+				<label class="check"><input type="checkbox" id="file-encrypt"> encrypt at rest</label>
+				<label class="check"><input type="checkbox" id="file-overwrite"> overwrite if exists</label>
+			</div>
+			<textarea id="file-content" rows="16" placeholder="file content…"></textarea>
+			<div class="row">
+				<button type="submit" class="button" id="file-save">save</button>
+				<button type="button" class="button ghost" id="file-cancel">cancel</button>
+				<span id="file-status" class="muted"></span>
+			</div>
+		</form>
+	</section>
+
+	<!-- Templates / SSR tab -->
+	<section id="tab-templates" class="panel">
+		<div class="row">
+			<select id="template-select"></select>
+			<button class="button" id="template-edit-btn">edit</button>
+			<button class="button" id="template-reload">reload list</button>
+		</div>
+		<pre class="tpl-source" id="template-source">(select a template)</pre>
+		<h3>Render playground</h3>
+		<form id="render-form" class="editor">
+			<div class="row">
+				<label>Template <input type="text" id="render-template" placeholder="page" required></label>
+				<button type="submit" class="button">render</button>
+			</div>
+			<label>Data (JSON, optional)
+				<textarea id="render-data" rows="6" placeholder='{"title":"Hello","items":["a","b"]}'></textarea>
+			</label>
+		</form>
+		<div class="render-result">
+			<iframe id="render-frame" title="rendered output"></iframe>
+		</div>
+	</section>
+
+	<!-- Meta tab -->
+	<section id="tab-meta" class="panel">
+		<p class="muted">Per-silo <code>.song/meta.json</code>: index header rules and template routes.</p>
+		<form id="meta-form">
+			<textarea id="meta-json" rows="18"></textarea>
+			<div class="row">
+				<button type="submit" class="button">save meta</button>
+				<span id="meta-status" class="muted"></span>
+			</div>
+		</form>
+	</section>
+
+	<!-- Upload tab -->
+	<section id="tab-upload" class="panel">
+		<form id="upload-form">
+			<div class="row">
+				<label>Directory <input type="text" id="upload-dir" placeholder="assets/" value=""></label>
+				<label class="check"><input type="checkbox" id="upload-encrypt"> encrypt at rest</label>
+			</div>
+			<input type="file" id="upload-files" multiple required>
+			<button type="submit" class="button">upload</button>
+		</form>
+		<ul id="upload-results" class="muted"></ul>
+	</section>
+
+	<!-- API tab -->
+	<section id="tab-api" class="panel">
+		<pre class="doc">
+Create a silo (form or JSON):
+  curl -X POST localhost:8083/api/song/silos -d 'name=demo'         # form
+  curl -X POST localhost:8083/api/song/silos -H 'Content-Type: application/json' -d '{"name":"demo"}'
+
+Create a file (form, JSON, or raw body):
+  curl -X POST localhost:8083/api/song/silos/demo/file \
+       -d 'path=index.html&content=<h1>hi</h1>&encrypt=false'
+
+Read:
+  curl 'localhost:8083/api/song/silos/demo/file?path=index.html&content=1'
+
+Update:
+  curl -X PUT localhost:8083/api/song/silos/demo/file \
+       -H 'Content-Type: application/json' -d '{"path":"app.js","content":"console.log(1)","encrypt":true}'
+
+Delete:
+  curl -X DELETE 'localhost:8083/api/song/silos/demo/file?path=app.js'
+
+Multipart upload:
+  curl -X POST localhost:8083/api/song/silos/demo/upload \
+       -F 'dir=assets' -F 'file=@logo.png'
+
+Server-side render (form or JSON):
+  curl -X POST localhost:8083/api/song/silos/demo/render \
+       -d 'template=page&title=Hello&items=a&items=b'
+
+Serve:  http://localhost:8083/demo/            (index.html by header)
+        http://localhost:8083/demo/index.html
+Encrypted files decrypt transparently when served.
+Magic links: POST /api/auth/generate, /validate, /revoke
+Admin UI:    /admin   Health: /health
+</pre>
+	</section>
+</main>
+
+<script src="/admin/app.js"></script>
+</body>
+</html>
