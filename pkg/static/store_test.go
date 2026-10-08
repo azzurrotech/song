@@ -14,7 +14,7 @@ const testSecret = "test-secret-key-0123456789abcdefghij"
 func newTestStore(t *testing.T) *Store {
 	t.Helper()
 	root := t.TempDir()
-	st, err := NewStore(root, testSecret)
+	st, err := NewStore(root, testSecret, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,7 +51,7 @@ func TestSiloValidation(t *testing.T) {
 
 func TestStoreRootCreation(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "nested", "store")
-	s, err := NewStore(root, testSecret)
+	s, err := NewStore(root, testSecret, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,7 +61,7 @@ func TestStoreRootCreation(t *testing.T) {
 	if s.Root() != filepath.Clean(root) {
 		t.Fatalf("root mismatch: got %q want %q", s.Root(), filepath.Clean(root))
 	}
-	if _, err := NewStore(root, "short"); err == nil {
+	if _, err := NewStore(root, "short", ""); err == nil {
 		t.Fatal("expected error for short secret")
 	}
 }
