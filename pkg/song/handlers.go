@@ -50,6 +50,13 @@ func (s *Song) handleAPI(w http.ResponseWriter, r *http.Request) {
 		default:
 			methodNotAllowed(w, "DELETE")
 		}
+	case 2:
+		// /api/song/silos/{silo}/base-url
+		if parts[1] == "base-url" {
+			s.apiBaseURL(w, r, parts[0])
+		} else {
+			s.handleFileAPI(w, r, parts)
+		}
 	default:
 		s.handleFileAPI(w, r, parts)
 	}
@@ -146,6 +153,43 @@ func (s *Song) apiDeleteSilo(w http.ResponseWriter, r *http.Request, name string
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"message": "silo removed"})
+}
+
+// apiBaseURL handles GET/PUT for the silo's base URL.
+func (s *Song) apiBaseURL(w http.ResponseWriter, r *http.Request, silo string) {
+	switch r.Method {
+	case http.MethodGet:
+		// Validate and auto-update base URL if needed
+		if err := s.store.ValidateBaseURL(silo); err != nil {
+			writeErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		m, err := s.store.Meta(silo)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		baseURL := m.BaseURL
+		if baseURL == "" {
+			baseURL = s.store.DefaultBaseURL(silo)
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"base_url": baseURL, "silo": silo})
+	case http.MethodPut:
+		var req struct {
+			BaseURL string `json:"base_url"`
+		}
+		if err := jsonDecode(r, &req); err != nil {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if err := s.store.SetBaseURL(silo, req.BaseURL); err != nil {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"message": "base URL set", "base_url": req.BaseURL})
+	default:
+		methodNotAllowed(w, "GET, PUT")
+	}
 }
 
 // handleFileAPI dispatches the per-silo file/render/meta/templates/upload

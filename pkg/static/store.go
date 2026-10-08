@@ -53,12 +53,15 @@ func (readSeekCloser) Close() error { return nil }
 
 // Store manages the siloed filesystem tree rooted at <root>.
 type Store struct {
-	root string
-	em   *encryption.EncryptionManager
+	root       string
+	em         *encryption.EncryptionManager
+	publicBase string // configurable public base URL (e.g., "http://localhost:8080")
 }
 
 // NewStore validates the secret, resolves and creates the root directory.
-func NewStore(root, secret string) (*Store, error) {
+// publicBase is the public base URL for silos (e.g., "http://localhost:8080").
+// If empty, defaults to relative paths "/c/{silo}/".
+func NewStore(root, secret, publicBase string) (*Store, error) {
 	if root == "" {
 		root = "./data"
 	}
@@ -73,7 +76,7 @@ func NewStore(root, secret string) (*Store, error) {
 	if err := os.MkdirAll(abs, 0o755); err != nil {
 		return nil, fmt.Errorf("create store root %q: %w", abs, err)
 	}
-	return &Store{root: abs, em: em}, nil
+	return &Store{root: abs, em: em, publicBase: publicBase}, nil
 }
 
 // Root returns the absolute store root directory.
@@ -132,7 +135,9 @@ func (s *Store) CreateSilo(name string) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("create silo %q: %w", name, err)
 	}
-	if err := s.saveMeta(name, defaultMeta()); err != nil {
+	meta := defaultMeta()
+	meta.BaseURL = s.DefaultBaseURL(name)
+	if err := s.saveMeta(name, meta); err != nil {
 		return err
 	}
 	return nil

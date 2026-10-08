@@ -170,6 +170,7 @@ document in a single parsed set.</p>
 			{Header: "User-Agent", Pattern: "(?i)mobile|android|iphone", File: "index.mobile.html"},
 		},
 		Encrypted: map[string]bool{"secrets/notes.txt": true},
+		BaseURL:   s.store.DefaultBaseURL(silo),
 	}
 	return s.store.SaveMeta(silo, meta)
 }

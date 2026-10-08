@@ -41,6 +41,9 @@ type Config struct {
 	Root   string           // store root directory (default "./data")
 	Secret string           // encryption secret, at least 32 characters
 	Funcs  template.FuncMap // optional extra server-side template functions
+	// PublicBase is the public base URL for silos (e.g., "http://localhost:8080").
+	// If empty, silos use relative paths "/c/{silo}/".
+	PublicBase string
 	// DisableUI hides the /admin management interface.
 	DisableUI bool
 }
@@ -56,7 +59,7 @@ type Song struct {
 
 // New builds a Song, creating the store root when needed.
 func New(cfg Config) (*Song, error) {
-	store, err := static.NewStore(cfg.Root, cfg.Secret)
+	store, err := static.NewStore(cfg.Root, cfg.Secret, cfg.PublicBase)
 	if err != nil {
 		return nil, err
 	}

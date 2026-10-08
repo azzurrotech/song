@@ -59,6 +59,12 @@ func createDemoSilo(t *testing.T, s *Song) (h http.Handler, name string) {
 		map[string]string{"Content-Type": "application/x-www-form-urlencoded"}); rec.Code != http.StatusCreated {
 		t.Fatalf("create silo: status %d body %s", rec.Code, rec.Body.String())
 	}
+	// Set base URL for the silo (required for file operations)
+	if rec := do(t, h, http.MethodPut, "/api/song/silos/demo/base-url",
+		strings.NewReader(`{"base_url": "/c/demo/"}`),
+		map[string]string{"Content-Type": "application/json"}); rec.Code != http.StatusOK {
+		t.Fatalf("set base URL: status %d body %s", rec.Code, rec.Body.String())
+	}
 	return h, "demo"
 }
 
