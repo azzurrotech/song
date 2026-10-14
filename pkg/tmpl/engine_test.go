@@ -211,3 +211,153 @@ func TestContentTypesHelpers(t *testing.T) {
 		}
 	}
 }
+
+func containsName(names []string, want string) bool {
+	for _, n := range names {
+		if n == want {
+			return true
+		}
+	}
+	return false
+}
+
+// TestFormatOfByExtension proves the format selection rule: non-HTML text
+// extensions use text/template, everything else uses html/template.
+func TestFormatOfByExtension(t *testing.T) {
+	for _, name := range []string{"note.txt", "readme.text", "doc.md", "doc.markdown", "UPPER.TXT"} {
+		if got := FormatOf(name); got != FormatText {
+			t.Errorf("FormatOf(%q) = %v, want text", name, got)
+		}
+	}
+	for _, name := range []string{"page.html", "page.htm", "page.tmpl", "layout", "data.json", "app.js"} {
+		if got := FormatOf(name); got != FormatHTML {
+			t.Errorf("FormatOf(%q) = %v, want html", name, got)
+		}
+	}
+}
+
+// TestHTMLAndTextTemplateProcessing proves both standard templating packages
+// are wired in: HTML files are escaped by html/template while text files are
+// rendered verbatim by text/template.
+func TestHTMLAndTextTemplateProcessing(t *testing.T) {
+	root := t.TempDir()
+	e := New(root)
+	writeTemplate(t, root, "demo", "page.html", `{{define "page"}}<h1>{{.Title}}</h1>{{end}}`)
+	writeTemplate(t, root, "demo", "note.txt", `{{define "note"}}Hello {{.Title}}{{end}}`)
+
+	data := map[string]any{"Title": "<World>"}
+
+	htmlOut := render(t, e, "demo", "page", data)
+	if !strings.Contains(htmlOut, "&lt;World&gt;") {
+		t.Fatalf("html/template must escape: %q", htmlOut)
+	}
+	textOut := render(t, e, "demo", "note", data)
+	if !strings.Contains(textOut, "Hello <World>") {
+		t.Fatalf("text/template must not escape: %q", textOut)
+	}
+	if e.IsText("demo", "page") {
+		t.Fatal("page.html must be an HTML template")
+	}
+	if !e.IsText("demo", "note") {
+		t.Fatal("note.txt must be a text template")
+	}
+
+	names, err := e.TemplateNames("demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsName(names, "page") || !containsName(names, "note") {
+		t.Fatalf("TemplateNames must include both sets: %v", names)
+	}
+
+	// Explicit text rendering routes through text/template.
+	var buf bytes.Buffer
+	if err := e.RenderText(&buf, "demo", "note", data); err != nil {
+		t.Fatal(err)
+	}
+	if buf.String() != "Hello <World>" {
+		t.Fatalf("RenderText output: %q", buf.String())
+	}
+}
+
+// TestComponentTagsAvailableFromAnyTemplate proves system-defined HTML
+// template tags are parsed into every silo's HTML set, so any HTML file can
+// instantiate them.
+func TestComponentTagsAvailableFromAnyTemplate(t *testing.T) {
+	root := t.TempDir()
+	e := New(root)
+	if err := e.AddComponent("song-badge", `<span class="badge">{{.}}</span>`); err != nil {
+		t.Fatal(err)
+	}
+	writeTemplate(t, root, "demo", "page.html", `{{define "page"}}<div>{{template "song-badge" .Name}}</div>{{end}}`)
+
+	out := render(t, e, "demo", "page", map[string]any{"Name": "Hi"})
+	if !strings.Contains(out, `<span class="badge">Hi</span>`) {
+		t.Fatalf("component tag not available: %q", out)
+	}
+	if got := e.Components(); len(got) != 1 || got[0] != "song-badge" {
+		t.Fatalf("Components() = %v", got)
+	}
+	names, err := e.TemplateNames("demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsName(names, "song-badge") {
+		t.Fatalf("component name missing from TemplateNames: %v", names)
+	}
+}
+
+// TestAddComponentValidation rejects invalid registrations at registration
+// time rather than at request time.
+func TestAddComponentValidation(t *testing.T) {
+	e := New(t.TempDir())
+	if err := e.AddComponent("", "x"); err == nil {
+		t.Fatal("empty name must be rejected")
+	}
+	if err := e.AddComponent("bad", ""); err == nil {
+		t.Fatal("empty source must be rejected")
+	}
+	if err := e.AddComponent("broken", "{{if}}"); err == nil {
+		t.Fatal("invalid template must be rejected")
+	}
+}
+
+// TestRenderInline proves plain .html files can be processed on the fly with
+// the component tags available, and that malformed sources report an error so
+// the caller can fall back to verbatim serving.
+func TestRenderInline(t *testing.T) {
+	e := New(t.TempDir())
+	if err := e.AddComponent("song-card", `<article>{{.}}</article>`); err != nil {
+		t.Fatal(err)
+	}
+	out, err := e.RenderInline("demo", `<html><body>{{template "song-card" .}}</body></html>`, "X")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "<article>X</article>") {
+		t.Fatalf("inline component render: %q", out)
+	}
+	// Literal markup passes through unchanged.
+	out, err = e.RenderInline("demo", "<p>plain</p>", nil)
+	if err != nil || out != "<p>plain</p>" {
+		t.Fatalf("inline passthrough = %q, err=%v", out, err)
+	}
+	// Malformed source is an error, never a panic or partial write.
+	if _, err := e.RenderInline("demo", "{{if}}", nil); err == nil {
+		t.Fatal("malformed inline template must error")
+	}
+}
+
+// TestTextTemplateReload proves text templates reload on change like HTML ones.
+func TestTextTemplateReload(t *testing.T) {
+	root := t.TempDir()
+	e := New(root)
+	writeTemplate(t, root, "demo", "n.txt", `{{define "n"}}v1{{end}}`)
+	if out := render(t, e, "demo", "n", nil); out != "v1" {
+		t.Fatalf("expected v1, got %q", out)
+	}
+	writeTemplate(t, root, "demo", "n.txt", `{{define "n"}}v2-changed{{end}}`)
+	if out := render(t, e, "demo", "n", nil); out != "v2-changed" {
+		t.Fatalf("text engine must reload on change, got %q", out)
+	}
+}

@@ -23,14 +23,17 @@ var (
 // dash and underscore, starting and ending with a letter or digit.
 var siloNameRe = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$`)
 
-// ReservedSiloNames cannot be used as silo names because the HTTP layer
-// routes those segments to built-in surfaces (API, admin UI, health).
+// ReservedSiloNames can never be used as silo names. In middleware mode this
+// keeps song from shadowing the URL segments host applications conventionally
+// own (/api, /admin, /health) and protects song's own private segments: the
+// .song metadata tree and the /_song Web Component runtime.
 var ReservedSiloNames = map[string]bool{
 	"api":    true,
 	"admin":  true,
 	"health": true,
 	"song":   true,
 	".song":  true,
+	"_song":  true,
 }
 
 // IsReservedSilo reports whether a first path segment collides with a

@@ -12,8 +12,8 @@ changes.
 Templates are executed with `html/template`, which applies contextual
 auto-escaping for HTML, attributes, JavaScript, CSS and URLs. The engine adds a
 batteries-included `FuncMap` (see below) and accepts host-injected functions and
-custom delimiters. `pkg/song` drives rendering from `/api/song/silos/{silo}/render`
-and from metadata template routes. Standard library only.
+custom delimiters. `pkg/song` drives rendering from the metadata template routes
+stored in each silo's `.song/meta.json`. Standard library only.
 
 ## Public API
 
@@ -36,11 +36,6 @@ Creates an engine rooted at `root` (default `"."`). Templates live in
 `<root>/<silo>/.templates`.
 
 ```go
-func (e *Engine) Root() string
-```
-Returns the template store root.
-
-```go
 func (e *Engine) SetDelims(left, right string)
 ```
 Sets custom delimiters and drops the cache. Only applied when the pair is not
@@ -57,11 +52,6 @@ func (e *Engine) SetFuncs(fm template.FuncMap)
 ```
 Replaces the host-supplied function map wholesale (nil becomes empty) and drops
 the cache.
-
-```go
-func (e *Engine) Template(silo string) (*template.Template, error)
-```
-Returns the cached or freshly parsed set for direct use by hosts.
 
 ```go
 func (e *Engine) TemplateNames(silo string) ([]string, error)
@@ -142,8 +132,6 @@ A silo's `.templates/layout.tmpl` + `.templates/page.tmpl` compose as usual:
 - **Delimiters:** unset by default (`{{`/`}}`); `SetDelims` drops the cache.
 
 ## Testing
-
-From `/home/matthew/Projects/Platform/stenella/atp/song`:
 
 ```bash
 go test ./pkg/tmpl/

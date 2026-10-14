@@ -1,95 +1,73 @@
 # song Security
 
-`azzurrotech/song/pkg/song` is the HTTP surface of song. It wires the storage,
-encryption, auth and templating packages into one handler. This document states
-what it protects, the mitigations that are actually implemented, and the
-guarantees it does **not** claim.
-
-## Assets protected
-
-1. **Hosted file content**, including files encrypted at rest.
-2. **Silo isolation** and the store root boundary.
-3. **Authentication state** (magic links) and the single-use ledger.
-4. **Rendered pages** (data must not become script injection).
-5. **The management surface** (`/admin`, `/api/song/*`, `/api/auth/*`).
+`azzurrotech/song/pkg/song` is the top-level HTTP surface of the module. It ties
+the static store, the template engine and the Web Component registry into one
+handler. This document describes the security model, the guarantees and the
+limits of the code as it stands.
 
 ## Threat model
 
-- **Path traversal / silo escape.** A request tries to read another silo, the
-  `.song` metadata tree, or the host filesystem.
-- **Stored-file XSS.** A tenant uploads HTML/SVG/JS and a victim loads it from
-  song's origin.
-- **Magic-link replay.** A captured link is reused.
-- **Plaintext at rest.** Someone with disk access reads encrypted content.
-- **Unauthenticated management.** Anyone reachable on the network administers
-  song.
+song stores web applications in per-tenant silos and serves them over HTTP. It
+assumes:
 
-Clients, headers, bodies, paths and file names are untrusted. The process host,
-store root and secret are trusted.
+- The process runs on a host it trusts (filesystem, store root).
+- Clients are untrusted: paths, headers and bodies all arrive hostile.
 
-## Mitigations implemented
+## What song protects
 
-- **Delegated path confinement.** All filesystem access goes through
-  `pkg/static` (`ParseRel`/`cleanRel`/`resolve`), which rejects `..`, NUL,
-  backslashes and `.song` segments and asserts the joined path stays inside the
-  silo. The API calls `static.ParseRel` before every read/write/delete.
-- **Reserved-route separation.** `splitSiloPath` + `static.IsReservedSilo`
-  prevent `api`, `admin`, `health`, `song` and `.song` from being addressed as
-  silos, so metadata and management endpoints are not reachable through the
-  serving path.
-- **Encryption at rest with transparency.** Files created with `encrypt=true`
-  are stored as AES-256-GCM `nonce || ciphertext`; serving decrypts them and
-  sets `X-Song-Encrypted: 1` so downstream systems know plaintext crossed the
-  wire.
-- **Contextual escaping.** `/render` and template routes execute through
-  `pkg/tmpl`/`html/template`; ordinary data values are escaped for their
-  context. The `json` helper HTML-escapes `</script>`.
-- **Magic links.** Generated via `pkg/auth` with a 24-hour expiry, optional
-  device binding, and a single-use ledger. `/api/auth/validate` rejects a link
-  whose `Used` flag is set (`404`), and marks an expired link used.
-- **Method and body discipline.** Handlers restrict methods and return JSON
-  `{"error": …}`; `mediaTypeOf` normalizes content types before parsing.
-- **Bounded uploads.** Multipart file parts/`/upload` streams are capped at
-  `maxUploadBytes` (64 MiB); multipart parsing spills beyond 16 MiB.
+### 1. Path traversal and silo isolation
 
-## Honest limits / non-claims
+Every path is normalized by `pkg/static` before touching the filesystem:
+absolute paths, `..` segments, backslashes and raw `.song` metadata segments are
+rejected. Reserved first segments (`api`, `admin`, `health`, `song`, `.song`,
+`_song`) can never be addressed as silos, so an attacker cannot reach the
+metadata tree or shadow a host application's conventional routes through the
+serving path.
 
-- **Management is unauthenticated.** `/admin`, `/api/song/*` and `/api/auth/*`
-  have no authentication, authorization or CSRF protection in this build. Put
-  song behind an authenticating reverse proxy or private network.
-- **No rate limiting, throttling or lockout** on any endpoint, including magic
-  link generation and validation.
-- **No audit logging** of reads, writes, deletes, logins or revocations.
-- **Magic-link single-use state is in-memory.** The ledger in `pkg/auth` resets
-  on restart and is not shared across instances, so replay protection does not
-  survive a restart or horizontal scaling.
-- **No TLS.** song is HTTP-only; terminate TLS at a proxy.
-- **Stored files are served with their declared content type.** An `index.html`,
-  `.svg`, `.js` or `.wasm` uploaded by a tenant is served as active content from
-  song's origin. Do not host mutually untrusted tenants on one origin; use
-  separate hosts/domains per tenant if that matters.
-- **No Content-Security-Policy, X-Frame-Options or CORS headers** are set by
-  song.
-- **Plaintext for unencrypted files.** Only files explicitly flagged `encrypt`
-  are protected at rest; everything else is readable on disk.
-- **Raw bodies are unbounded by `maxUploadBytes`.** Raw-body create and JSON/form
-  `content` fields are read into memory and are not capped by that constant.
-- **Template authors are trusted within their silo** and can invoke unescaped
-  `html`/`js` helpers (see `pkg/tmpl`).
-- **Errors can echo input.** Some `400`/`500` bodies include path or store error
-  text; run a sanitizing proxy if error detail must not reach clients.
-- **No per-user authorization.** A validated magic link proves token control
-  only; there are no roles or per-silo ACLs.
-- **The documented default secret** (`main.go`) must never be used; set
-  `SONG_SECRET`.
+### 2. Contextual escaping in server-side rendering
 
-## Dependencies
+Pages are rendered with `html/template`, whose contextual auto-escaping applies
+to HTML, attributes, JavaScript, CSS and URLs. Plain strings stored in files are
+never injected as raw markup on re-render. Text templates are rendered with
+`text/template` and served as `text/plain`, so they are not an HTML injection
+vector. The `json` helper HTML-escapes `</script>` so even developer-typed data
+cannot break out of a `<script>` block.
 
-Standard library only, plus module-internal packages `azzurrotech/song/pkg/auth`,
-`azzurrotech/song/pkg/static` and `azzurrotech/song/pkg/tmpl`. No third-party
-modules.
+### 3. Bounded request handling
 
-## Reporting
+A POST upsert reads at most `maxUploadBytes` (64 MiB), and inline HTML
+processing reads at most `maxInlineHTML` (4 MiB) before falling back to verbatim
+streaming, so a single request cannot exhaust memory or fill the disk
+unboundedly.
 
-Report vulnerabilities privately to `security@azzurro.tech`. Do not open a
-public issue for a live vulnerability.
+## Configuration checklist
+
+- Run behind TLS (Caddy/nginx) in production; song itself is HTTP-only.
+- Mount the store root (`--root`, `SONG_ROOT`) as private storage, never as
+  public web content outside song.
+- Keep the store root on a filesystem with appropriate POSIX permissions; song
+  creates silos `0755` and files `0644`.
+- There is **no secret to set**: song stores plain files and renders templates.
+
+## Out of scope / honest limits
+
+- **No authentication or authorization.** song has no access control of its own:
+  any client that can reach it can read every silo and POST to every silo. Put
+  song behind an authenticating reverse proxy, or mount it only on a private
+  network, when its surface must not be public.
+- **No encryption at rest.** File content is stored as plain bytes; protect the
+  store root with host-level access control.
+- **No rate limiting, quotas or audit logs.**
+- **No per-user authorization** beyond silo name separation.
+
+These are deliberate simplifications, not implemented-but-unwritten claims.
+
+## Reporting a vulnerability
+
+Contact the maintainers privately via the Azzurro Technology org. Do not open a
+public issue for a live vulnerability. Advisories will be published as they are
+addressed.
+
+---
+
+*MIT License © Azzurro Technology Inc.*

@@ -1,8 +1,8 @@
 #
-# song — static hosting, server-side rendering, encrypted files.
+# song — static hosting with server-side template processing and Web Components.
 # Standard library only: no external Go modules are fetched at build time.
 #
-# Host port for the song service is 8083 (see AGENTS.md port table).
+# The container listens on port 8083 by default (--port / SONG_PORT).
 #
 
 FROM golang:1.20-alpine AS build
@@ -12,7 +12,6 @@ WORKDIR /src
 # No go.sum / external requires: all dependencies are the Go standard library
 # and packages inside this module, so only the source tree is needed.
 COPY go.mod ./
-COPY internal/ internal/
 COPY pkg/ pkg/
 COPY main.go ./
 
@@ -29,7 +28,7 @@ RUN mkdir -p /data && chown song:song /data
 
 USER song
 
-# Per-silo store root: files, .templates, .song/meta.json, encrypted content.
+# Per-silo store root: static files, .templates/ and .song/meta.json.
 VOLUME ["/data"]
 EXPOSE 8083
 

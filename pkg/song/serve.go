@@ -2,6 +2,7 @@ package song
 
 import (
 	"errors"
+	"io"
 	"mime"
 	"net/http"
 	"path"
@@ -11,15 +12,36 @@ import (
 	"azzurrotech/song/pkg/static"
 )
 
-// handleSilo serves a request for a path inside an existing silo:
+// maxInlineHTML caps the size of a served .html file that song will read into
+// memory to process it as a Go template / web-component document. Larger files
+// are streamed verbatim.
+const maxInlineHTML = 4 << 20 // 4 MiB
+
+// maxUploadBytes caps the content accepted by a POST resource upsert, so a
+// single request cannot fill the disk or memory.
+const maxUploadBytes = 64 << 20 // 64 MiB
+
+// handleSilo serves a request for a path inside an existing silo.
 //
-//  1. template routes from the silo metadata take precedence (SSR),
-//  2. directory requests resolve their index document using the client
-//     header rules (transparent serve or 302 redirect),
-//  3. encrypted files are transparently decrypted before being served,
+// GET/HEAD:
+//
+//  1. template routes from the silo metadata take precedence (server-side
+//     rendering of a named Go template, in text or HTML format),
+//  2. a directory request serves its index.html document when present,
+//  3. HTML documents are processed as Go templates and gain the system-defined
+//     web-component tags,
 //  4. everything else is served as a plain static asset.
+//
+// POST upserts a static resource at the requested path with the request body as
+// its content (see upsertResource).
 func (s *Song) handleSilo(w http.ResponseWriter, r *http.Request, silo, rest string) {
-	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+	switch r.Method {
+	case http.MethodGet, http.MethodHead:
+		// Serving path below.
+	case http.MethodPost:
+		s.upsertResource(w, r, silo, rest)
+		return
+	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
@@ -32,18 +54,10 @@ func (s *Song) handleSilo(w http.ResponseWriter, r *http.Request, silo, rest str
 		}
 	}
 
-	// 2. Index resolution for directory requests.
+	// 2. Directory requests serve their index.html document when present.
 	dirPath := rest
 	if dirPath == "" || strings.HasSuffix(r.URL.Path, "/") {
-		idx, redirect, err := s.store.ResolveIndex(silo, dirPath, r.Header)
-		if err == nil {
-			full := path.Join(dirPath, idx)
-			if redirect {
-				target := path.Join("/", silo, full)
-				http.Redirect(w, r, target, http.StatusFound)
-				return
-			}
-			s.serveFile(w, r, silo, full)
+		if s.serveIndexDocument(w, r, silo, dirPath) {
 			return
 		}
 	}
@@ -51,9 +65,72 @@ func (s *Song) handleSilo(w http.ResponseWriter, r *http.Request, silo, rest str
 	s.serveFile(w, r, silo, rest)
 }
 
-// serveFile streams a silo file with correct content type, cache headers
-// and transparent decryption of encrypted content.
+// serveIndexDocument serves <dir>/index.html when the document exists and
+// reports whether the request was handled. A directory without an index
+// document is left to the caller, which turns it into a 404.
+func (s *Song) serveIndexDocument(w http.ResponseWriter, r *http.Request, silo, dir string) bool {
+	rel := path.Join(dir, "index.html")
+	if _, err := s.store.Stat(silo, rel); err != nil || rel == "" {
+		return false
+	}
+	s.serveFile(w, r, silo, rel)
+	return true
+}
+
+// upsertResource implements POST /<silo>/<path>: create or update a static
+// resource whose content is the raw request body. This is the HTTP surface the
+// README describes as "POST /<path> — Upsert (create or update) static web
+// resources. The request body contains the resource content."
+//
+// It returns 201 Created for a new resource and 200 OK when an existing
+// resource was replaced; the response is JSON describing the stored file.
+func (s *Song) upsertResource(w http.ResponseWriter, r *http.Request, silo, rest string) {
+	rel, err := static.ParseRel(rest)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if rel == "" {
+		http.Error(w, "path is required", http.StatusBadRequest)
+		return
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxUploadBytes))
+	if err != nil {
+		http.Error(w, "read body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	content := string(body)
+
+	fi, err := s.store.Create(silo, rel, content)
+	if err == nil {
+		writeJSON(w, http.StatusCreated, map[string]any{"message": "resource created", "file": fi})
+		return
+	}
+	if errors.Is(err, static.ErrExists) {
+		fi, err = s.store.Update(silo, rel, content)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"message": "resource updated", "file": fi})
+		return
+	}
+
+	status := http.StatusInternalServerError
+	if errors.Is(err, static.ErrTraversal) || errors.Is(err, static.ErrReserved) || errors.Is(err, static.ErrInvalidName) {
+		status = http.StatusBadRequest
+	}
+	http.Error(w, err.Error(), status)
+}
+
+// serveFile streams a silo file with correct content type and cache headers.
+// HTML documents are first given the template/web-component treatment; when
+// they need none they are streamed byte-for-byte.
 func (s *Song) serveFile(w http.ResponseWriter, r *http.Request, silo, rel string) {
+	if isHTMLPath(rel) && s.tryServeHTML(w, r, silo, rel) {
+		return
+	}
+
 	entry, err := s.store.Open(silo, rel)
 	if err != nil {
 		switch {
@@ -78,13 +155,62 @@ func (s *Song) serveFile(w http.ResponseWriter, r *http.Request, silo, rel strin
 	ct := contentTypeFor(rel)
 	w.Header().Set("Content-Type", ct)
 	setCacheHeaders(w, rel)
-	if entry.Encrypted {
-		w.Header().Set("X-Song-Encrypted", "1")
-	}
-	// ServeContent handles conditional requests and Range on the (seeking)
-	// reader, whether the underlying data is a plain file or a decrypted
-	// in-memory buffer.
+	// ServeContent handles conditional requests and Range on the seeking
+	// reader.
 	http.ServeContent(w, r, entry.Name, entry.ModTime, entry.Reader)
+}
+
+// isHTMLPath reports whether a silo path names an HTML document.
+func isHTMLPath(rel string) bool {
+	switch strings.ToLower(filepath.Ext(rel)) {
+	case ".html", ".htm":
+		return true
+	}
+	return false
+}
+
+// tryServeHTML processes a plain .html file with the server-side HTML template
+// engine, which makes every registered web-component tag resolvable with
+// {{template "tag" .}}, and injects the client-side component definitions and
+// runtime when the document instantiates a registered custom element.
+//
+// It returns false — without having written anything — when the document needs
+// no processing, is a directory, exceeds maxInlineHTML, cannot be read, or is
+// not valid Go template syntax. The caller then streams the file verbatim, so
+// ordinary static HTML is never altered.
+func (s *Song) tryServeHTML(w http.ResponseWriter, r *http.Request, silo, rel string) bool {
+	info, err := s.store.Stat(silo, rel)
+	if err != nil || info.IsDir || info.Size > maxInlineHTML {
+		return false
+	}
+	entry, err := s.store.Read(silo, rel, true)
+	if err != nil {
+		return false
+	}
+	src := string(entry.Content)
+	usesComponents := s.components.UsedIn(src)
+	if !usesComponents && !strings.Contains(src, "{{") {
+		return false
+	}
+	out, err := s.engine.RenderInline(silo, src, nil)
+	if err != nil {
+		if !usesComponents {
+			// Not valid Go template syntax: serve the original file untouched.
+			return false
+		}
+		// The document uses a registered tag but is not valid Go template
+		// syntax. Serve it verbatim but still make the tag available.
+		out = src
+	}
+	if usesComponents {
+		out = s.components.Inject(out)
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	setCacheHeaders(w, rel)
+	w.Header().Set("X-Song-Template-Processed", "1")
+	http.ServeContent(w, r, entry.Name, entry.Modified, strings.NewReader(out))
+	return true
 }
 
 // renderSiloRoute executes a template registered in the silo metadata,
@@ -96,7 +222,11 @@ func (s *Song) renderSiloRoute(w http.ResponseWriter, r *http.Request, silo, rou
 		http.Error(w, "render error: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if s.engine.IsText(silo, tpl) {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	} else {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	}
 	w.Header().Set("X-Song-Template", tpl)
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(buf.String()))

@@ -13,8 +13,7 @@ describes the protections it implements and the ones it deliberately does not.
 ## Threat model
 
 - **Data-driven XSS.** Attacker-controlled values passed as template data
-  (`?name=`, JSON bodies, form fields) are placed into HTML, attributes, JS,
-  CSS or URLs.
+  (`?name=` query parameters) are placed into HTML, attributes, JS, CSS or URLs.
 - **Template-name abuse.** A caller supplies a template name or silo name.
 - **Malicious template files.** A tenant writes template files into their own
   silo (this is expected and by design; a template author is trusted within
@@ -51,10 +50,12 @@ describes the protections it implements and the ones it deliberately does not.
   unescaped helpers (`html`, `js`, …) and inject raw markup intentionally. song
   does not sandbox template execution; a template author can read the data they
   are given and render anything.
-- **`.templates` is tenant-writable through the API.** Any client that can
-  create files in a silo can create templates there, including templates that
-  bypass escaping. In this build the management API is unauthenticated (see the
-  root security notes), so do not expose it.
+- **`.templates` is writable by anyone who can POST into the silo.** The
+  resource-upsert surface accepts any path inside a silo, so any client that can
+  reach song can create templates there, including templates that bypass
+  escaping. In this build song has no authentication (see the root security
+  notes), so do not expose it. Drop template files onto disk directly when only
+  the host should author them.
 - **Host-injected functions are powerful.** `AddFuncs`/`SetFuncs` may register
   functions with side effects; only the host application should supply them.
 - **No sandbox / no execution timeout.** A pathological template or a slow

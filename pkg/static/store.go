@@ -1,11 +1,9 @@
-// Package static implements song's siloed static-file store. Files live
-// under <root>/<silo>/ and may be stored encrypted at rest (AES-256-GCM via
-// the shared encryption manager). A hidden .song/meta.json per silo records
-// encryption state, index-routing rules and server-side template routes.
+// Package static implements song's siloed static-file store. Files live under
+// <root>/<silo>/ as plain bytes. A hidden .song/meta.json per silo records the
+// server-side template routes that map a request path onto a named Go template.
 package static
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -15,8 +13,6 @@ import (
 	"sort"
 	"strings"
 	"time"
-
-	"azzurrotech/song/internal/encryption"
 )
 
 // FileInfo describes a stored file or directory for listings and stats.
@@ -26,7 +22,6 @@ type FileInfo struct {
 	Size        int64     `json:"size"`
 	ContentType string    `json:"content_type"`
 	IsDir       bool      `json:"is_dir"`
-	Encrypted   bool      `json:"encrypted,omitempty"`
 	Modified    time.Time `json:"modified"`
 }
 
@@ -37,37 +32,24 @@ type FileEntry struct {
 }
 
 // ReaderEntry is a seekable, closable handle on file content prepared for
-// serving (encrypted files are transparently decrypted into memory).
+// serving. It satisfies io.ReadSeekCloser so http.ServeContent can satisfy
+// conditional and Range requests.
 type ReaderEntry struct {
-	Reader    io.ReadSeekCloser
-	Size      int64
-	Encrypted bool
-	Name      string
-	ModTime   time.Time
+	Reader  io.ReadSeekCloser
+	Size    int64
+	Name    string
+	ModTime time.Time
 }
-
-// readSeekCloser adapts a *bytes.Reader into an io.ReadSeekCloser.
-type readSeekCloser struct{ *bytes.Reader }
-
-func (readSeekCloser) Close() error { return nil }
 
 // Store manages the siloed filesystem tree rooted at <root>.
 type Store struct {
-	root       string
-	em         *encryption.EncryptionManager
-	publicBase string // configurable public base URL (e.g., "http://localhost:8080")
+	root string
 }
 
-// NewStore validates the secret, resolves and creates the root directory.
-// publicBase is the public base URL for silos (e.g., "http://localhost:8080").
-// If empty, defaults to relative paths "/c/{silo}/".
-func NewStore(root, secret, publicBase string) (*Store, error) {
+// NewStore resolves and creates the store root directory.
+func NewStore(root string) (*Store, error) {
 	if root == "" {
 		root = "./data"
-	}
-	em, err := encryption.NewEncryptionManager(secret)
-	if err != nil {
-		return nil, err
 	}
 	abs, err := filepath.Abs(root)
 	if err != nil {
@@ -76,14 +58,11 @@ func NewStore(root, secret, publicBase string) (*Store, error) {
 	if err := os.MkdirAll(abs, 0o755); err != nil {
 		return nil, fmt.Errorf("create store root %q: %w", abs, err)
 	}
-	return &Store{root: abs, em: em, publicBase: publicBase}, nil
+	return &Store{root: abs}, nil
 }
 
 // Root returns the absolute store root directory.
 func (s *Store) Root() string { return s.root }
-
-// Encryption exposes the shared encryption manager.
-func (s *Store) Encryption() *encryption.EncryptionManager { return s.em }
 
 // siloDir returns the absolute, validated directory of a silo.
 func (s *Store) siloDir(name string) (string, error) {
@@ -136,7 +115,6 @@ func (s *Store) CreateSilo(name string) error {
 		return fmt.Errorf("create silo %q: %w", name, err)
 	}
 	meta := defaultMeta()
-	meta.BaseURL = s.DefaultBaseURL(name)
 	if err := s.saveMeta(name, meta); err != nil {
 		return err
 	}
@@ -170,14 +148,6 @@ func (s *Store) filePath(silo, rel string) (string, error) {
 		return "", err
 	}
 	return resolve(dir, rel)
-}
-
-func (s *Store) isEncrypted(silo, rel string) bool {
-	m, err := s.loadMeta(silo)
-	if err != nil {
-		return false
-	}
-	return m.Encrypted[rel]
 }
 
 // List returns entries of the silo directory at rel, excluding hidden files
@@ -220,7 +190,6 @@ func (s *Store) List(silo, rel string) ([]FileInfo, error) {
 			Size:        info.Size(),
 			ContentType: contentTypeFor(e.Name(), info.IsDir()),
 			IsDir:       info.IsDir(),
-			Encrypted:   !info.IsDir() && s.isEncrypted(silo, child),
 			Modified:    info.ModTime(),
 		})
 	}
@@ -252,13 +221,11 @@ func (s *Store) Stat(silo, rel string) (*FileInfo, error) {
 		Size:        fi.Size(),
 		ContentType: contentTypeFor(rel, fi.IsDir()),
 		IsDir:       fi.IsDir(),
-		Encrypted:   !fi.IsDir() && s.isEncrypted(silo, rel),
 		Modified:    fi.ModTime(),
 	}, nil
 }
 
-// Read returns a file's metadata and, when withContent is true, its
-// (decrypted) content.
+// Read returns a file's metadata and, when withContent is true, its content.
 func (s *Store) Read(silo, rel string, withContent bool) (*FileEntry, error) {
 	fp, err := s.filePath(silo, rel)
 	if err != nil {
@@ -280,7 +247,6 @@ func (s *Store) Read(silo, rel string, withContent bool) (*FileEntry, error) {
 		Size:        fi.Size(),
 		ContentType: contentTypeFor(rel, false),
 		IsDir:       false,
-		Encrypted:   s.isEncrypted(silo, rel),
 		Modified:    fi.ModTime(),
 	}}
 	if withContent {
@@ -288,20 +254,14 @@ func (s *Store) Read(silo, rel string, withContent bool) (*FileEntry, error) {
 		if err != nil {
 			return nil, fmt.Errorf("read file %q: %w", rel, err)
 		}
-		if entry.Encrypted {
-			data, err = s.em.DecryptBytes(data)
-			if err != nil {
-				return nil, fmt.Errorf("decrypt file %q: %w", rel, err)
-			}
-		}
 		entry.Content = data
 	}
 	return entry, nil
 }
 
-// Open prepares a file for serving: plain files yield an open *os.File,
-// encrypted files are decrypted into memory and returned as a seeking
-// reader so http.ServeContent can still serve ranges.
+// Open prepares a file for serving by returning an open handle on its
+// content, seekable so http.ServeContent can satisfy conditional and Range
+// requests.
 func (s *Store) Open(silo, rel string) (*ReaderEntry, error) {
 	fp, err := s.filePath(silo, rel)
 	if err != nil {
@@ -317,34 +277,16 @@ func (s *Store) Open(silo, rel string) (*ReaderEntry, error) {
 	if fi.IsDir() {
 		return nil, fmt.Errorf("%w: %q", ErrIsDir, rel)
 	}
-	name := filepath.Base(fp)
-	if !s.isEncrypted(silo, rel) {
-		f, err := os.Open(fp)
-		if err != nil {
-			return nil, fmt.Errorf("open file %q: %w", rel, err)
-		}
-		return &ReaderEntry{Reader: f, Size: fi.Size(), Encrypted: false, Name: name, ModTime: fi.ModTime()}, nil
-	}
-	data, err := os.ReadFile(fp)
+	f, err := os.Open(fp)
 	if err != nil {
-		return nil, fmt.Errorf("read encrypted file %q: %w", rel, err)
+		return nil, fmt.Errorf("open file %q: %w", rel, err)
 	}
-	plain, err := s.em.DecryptBytes(data)
-	if err != nil {
-		return nil, fmt.Errorf("decrypt file %q: %w", rel, err)
-	}
-	return &ReaderEntry{
-		Reader:    &readSeekCloser{bytes.NewReader(plain)},
-		Size:      int64(len(plain)),
-		Encrypted: true,
-		Name:      name,
-		ModTime:   fi.ModTime(),
-	}, nil
+	return &ReaderEntry{Reader: f, Size: fi.Size(), Name: filepath.Base(fp), ModTime: fi.ModTime()}, nil
 }
 
-// writeFile streams content into a silo path, encrypting it when requested
-// and keeping the .song/meta.json encryption map consistent.
-func (s *Store) writeFile(silo, rel string, r io.Reader, encrypt bool) (*FileInfo, error) {
+// writeFile streams content into a silo path, creating parent directories as
+// needed.
+func (s *Store) writeFile(silo, rel string, r io.Reader) (*FileInfo, error) {
 	fp, err := s.filePath(silo, rel)
 	if err != nil {
 		return nil, err
@@ -352,43 +294,22 @@ func (s *Store) writeFile(silo, rel string, r io.Reader, encrypt bool) (*FileInf
 	if err := os.MkdirAll(filepath.Dir(fp), 0o755); err != nil {
 		return nil, fmt.Errorf("create parent dirs for %q: %w", rel, err)
 	}
-	if encrypt {
-		plain, err := io.ReadAll(r)
-		if err != nil {
-			return nil, fmt.Errorf("read content for %q: %w", rel, err)
-		}
-		ct, err := s.em.EncryptBytes(plain)
-		if err != nil {
-			return nil, fmt.Errorf("encrypt %q: %w", rel, err)
-		}
-		if err := os.WriteFile(fp, ct, 0o644); err != nil {
-			return nil, fmt.Errorf("write %q: %w", rel, err)
-		}
-		if _, err := s.updateMeta(silo, func(m *Meta) { m.Encrypted[rel] = true }); err != nil {
-			return nil, err
-		}
-	} else {
-		f, err := os.Create(fp)
-		if err != nil {
-			return nil, fmt.Errorf("create %q: %w", rel, err)
-		}
-		_, cerr := io.Copy(f, r)
-		ierr := f.Close()
-		if cerr != nil {
-			return nil, cerr
-		}
-		if ierr != nil {
-			return nil, ierr
-		}
-		if _, err := s.updateMeta(silo, func(m *Meta) { delete(m.Encrypted, rel) }); err != nil {
-			return nil, err
-		}
+	f, err := os.Create(fp)
+	if err != nil {
+		return nil, fmt.Errorf("create %q: %w", rel, err)
+	}
+	if _, cerr := io.Copy(f, r); cerr != nil {
+		_ = f.Close()
+		return nil, cerr
+	}
+	if ierr := f.Close(); ierr != nil {
+		return nil, ierr
 	}
 	return s.Stat(silo, rel)
 }
 
 // Create stores a new file, failing with ErrExists when it is already there.
-func (s *Store) Create(silo, rel, content string, encrypt bool) (*FileInfo, error) {
+func (s *Store) Create(silo, rel, content string) (*FileInfo, error) {
 	fp, err := s.filePath(silo, rel)
 	if err != nil {
 		return nil, err
@@ -396,12 +317,12 @@ func (s *Store) Create(silo, rel, content string, encrypt bool) (*FileInfo, erro
 	if _, err := os.Stat(fp); err == nil {
 		return nil, fmt.Errorf("%w: %q", ErrExists, rel)
 	}
-	return s.writeFile(silo, rel, strings.NewReader(content), encrypt)
+	return s.writeFile(silo, rel, strings.NewReader(content))
 }
 
-// Update rewrites an existing file. A nil encrypt keeps the current
-// encryption state; otherwise the file is re-stored accordingly.
-func (s *Store) Update(silo, rel, content string, encrypt *bool) (*FileInfo, error) {
+// Update rewrites an existing file, failing with ErrNotFound when it is not
+// stored yet.
+func (s *Store) Update(silo, rel, content string) (*FileInfo, error) {
 	cur, err := s.Stat(silo, rel)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
@@ -412,19 +333,10 @@ func (s *Store) Update(silo, rel, content string, encrypt *bool) (*FileInfo, err
 	if cur.IsDir {
 		return nil, fmt.Errorf("%w: %q", ErrIsDir, rel)
 	}
-	enc := cur.Encrypted
-	if encrypt != nil {
-		enc = *encrypt
-	}
-	return s.writeFile(silo, rel, strings.NewReader(content), enc)
+	return s.writeFile(silo, rel, strings.NewReader(content))
 }
 
-// Upload streams a reader into a silo path (create or overwrite).
-func (s *Store) Upload(silo, rel string, r io.Reader, encrypt bool) (*FileInfo, error) {
-	return s.writeFile(silo, rel, r, encrypt)
-}
-
-// Delete removes a file and its encryption flag.
+// Delete removes a file.
 func (s *Store) Delete(silo, rel string) error {
 	fp, err := s.filePath(silo, rel)
 	if err != nil {
@@ -443,29 +355,11 @@ func (s *Store) Delete(silo, rel string) error {
 	if err := os.Remove(fp); err != nil {
 		return fmt.Errorf("remove %q: %w", rel, err)
 	}
-	_, err = s.updateMeta(silo, func(m *Meta) { delete(m.Encrypted, rel) })
-	return err
+	return nil
 }
 
 // Meta returns the current metadata of a silo.
 func (s *Store) Meta(silo string) (*Meta, error) { return s.loadMeta(silo) }
-
-// SaveMeta replaces a silo's metadata wholesale.
-func (s *Store) SaveMeta(silo string, m *Meta) error {
-	if m == nil {
-		m = defaultMeta()
-	}
-	if m.TemplateRoutes == nil {
-		m.TemplateRoutes = map[string]string{}
-	}
-	if m.Encrypted == nil {
-		m.Encrypted = map[string]bool{}
-	}
-	if m.Version == 0 {
-		m.Version = 1
-	}
-	return s.saveMeta(silo, m)
-}
 
 // SetTemplateRoute registers (or, with tpl == "", removes) a route that
 // server-side renders the named Go template instead of serving a file.
@@ -478,25 +372,6 @@ func (s *Store) SetTemplateRoute(silo, route, tpl string) error {
 		}
 	})
 	return err
-}
-
-// TemplateDir returns the absolute templates directory of a silo.
-func (s *Store) TemplateDir(silo string) (string, error) {
-	dir, err := s.siloDir(silo)
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(dir, ".templates"), nil
-}
-
-// fileExists reports whether a cleaned silo-relative path names a file.
-func (s *Store) fileExists(silo, rel string) bool {
-	fp, err := s.filePath(silo, rel)
-	if err != nil {
-		return false
-	}
-	fi, err := os.Stat(fp)
-	return err == nil && !fi.IsDir()
 }
 
 // contentTypeFor maps a file name to a sane web content type.

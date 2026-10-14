@@ -2,19 +2,16 @@ package static
 
 import (
 	"errors"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
 
-const testSecret = "test-secret-key-0123456789abcdefghij"
-
 func newTestStore(t *testing.T) *Store {
 	t.Helper()
 	root := t.TempDir()
-	st, err := NewStore(root, testSecret, "")
+	st, err := NewStore(root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,7 +48,7 @@ func TestSiloValidation(t *testing.T) {
 
 func TestStoreRootCreation(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "nested", "store")
-	s, err := NewStore(root, testSecret, "")
+	s, err := NewStore(root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,9 +58,6 @@ func TestStoreRootCreation(t *testing.T) {
 	if s.Root() != filepath.Clean(root) {
 		t.Fatalf("root mismatch: got %q want %q", s.Root(), filepath.Clean(root))
 	}
-	if _, err := NewStore(root, "short", ""); err == nil {
-		t.Fatal("expected error for short secret")
-	}
 }
 
 func TestFileCRUD(t *testing.T) {
@@ -71,12 +65,9 @@ func TestFileCRUD(t *testing.T) {
 	mustCreateSilo(t, s, "demo")
 
 	// Create + read.
-	fi, err := s.Create("demo", "css/app.css", "body { color: red }", false)
+	fi, err := s.Create("demo", "css/app.css", "body { color: red }")
 	if err != nil {
 		t.Fatal(err)
-	}
-	if fi.Encrypted {
-		t.Fatal("file must not be encrypted")
 	}
 	if fi.Path != "/css/app.css" {
 		t.Fatalf("path mismatch: %q", fi.Path)
@@ -90,10 +81,10 @@ func TestFileCRUD(t *testing.T) {
 	}
 
 	// Duplicate create fails; update works.
-	if _, err := s.Create("demo", "css/app.css", "x", false); !errors.Is(err, ErrExists) {
+	if _, err := s.Create("demo", "css/app.css", "x"); !errors.Is(err, ErrExists) {
 		t.Fatalf("expected ErrExists, got %v", err)
 	}
-	if _, err := s.Update("demo", "css/app.css", "body { color: blue }", nil); err != nil {
+	if _, err := s.Update("demo", "css/app.css", "body { color: blue }"); err != nil {
 		t.Fatal(err)
 	}
 	entry, _ = s.Read("demo", "css/app.css", true)
@@ -113,16 +104,15 @@ func TestFileCRUD(t *testing.T) {
 	}
 }
 
-func TestEncryptedFiles(t *testing.T) {
+// TestFilesStoredAsPlainBytes confirms the store keeps file content verbatim on
+// disk (song's README describes plain static hosting).
+func TestFilesStoredAsPlainBytes(t *testing.T) {
 	s := newTestStore(t)
-	mustCreateSilo(t, s, "vault")
-
-	if _, err := s.Create("vault", "secrets/note.txt", "top secret", true); err != nil {
+	mustCreateSilo(t, s, "demo")
+	if _, err := s.Create("demo", "note.txt", "hello world"); err != nil {
 		t.Fatal(err)
 	}
-
-	// On-disk bytes must not contain the plaintext.
-	abs, err := s.filePath("vault", "secrets/note.txt")
+	abs, err := s.filePath("demo", "note.txt")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,62 +120,24 @@ func TestEncryptedFiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(raw), "top secret") {
-		t.Fatal("plaintext leaked to disk")
+	if string(raw) != "hello world" {
+		t.Fatalf("content must be stored verbatim, got %q", raw)
 	}
-
-	// Read decrypts transparently.
-	entry, err := s.Read("vault", "secrets/note.txt", true)
+	entry, err := s.Read("demo", "note.txt", true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !entry.Encrypted {
-		t.Fatal("file must be flagged encrypted")
+	if string(entry.Content) != "hello world" {
+		t.Fatalf("read content mismatch: %q", entry.Content)
 	}
-	if string(entry.Content) != "top secret" {
-		t.Fatalf("decrypted content mismatch: %q", entry.Content)
-	}
-
-	// Update keeping encryption.
-	if _, err := s.Update("vault", "secrets/note.txt", "updated secret", nil); err != nil {
-		t.Fatal(err)
-	}
-	entry, _ = s.Read("vault", "secrets/note.txt", true)
-	if string(entry.Content) != "updated secret" {
-		t.Fatalf("update of encrypted file failed: %q", entry.Content)
-	}
-
-	// Update switching to plain.
-	keep := false
-	if _, err := s.Update("vault", "secrets/note.txt", "now plain", &keep); err != nil {
-		t.Fatal(err)
-	}
-	entry, _ = s.Read("vault", "secrets/note.txt", true)
-	if entry.Encrypted {
-		t.Fatal("file should no longer be encrypted")
-	}
-	raw, _ = os.ReadFile(abs)
-	if !strings.Contains(string(raw), "now plain") {
-		t.Fatal("plain file should be readable on disk")
-	}
-	if s.isEncrypted("vault", "secrets/note.txt") {
-		t.Fatal("meta should no longer mark the file encrypted")
-	}
-
-	// Open() serves decrypted content.
-	if _, err := s.Create("vault", "secret2.txt", "abc123", true); err != nil {
-		t.Fatal(err)
-	}
-	ent, err := s.Open("vault", "secret2.txt")
+	// Open() exposes the same bytes and their size.
+	ent, err := s.Open("demo", "note.txt")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer ent.Reader.Close()
-	if !ent.Encrypted {
-		t.Fatal("Open must flag encrypted")
-	}
-	if ent.Size != 6 {
-		t.Fatalf("logical size mismatch: %d", ent.Size)
+	if ent.Size != int64(len("hello world")) {
+		t.Fatalf("size mismatch: %d", ent.Size)
 	}
 }
 
@@ -200,7 +152,7 @@ func TestPathTraversalRejected(t *testing.T) {
 		} else if !errors.Is(err, ErrTraversal) && !errors.Is(err, ErrReserved) {
 			t.Errorf("rel %q: expected ErrTraversal/ErrReserved, got %v", rel, err)
 		}
-		if _, err := s.Create("demo", rel, "x", false); err == nil {
+		if _, err := s.Create("demo", rel, "x"); err == nil {
 			t.Errorf("expected error creating rel %q", rel)
 		}
 	}
@@ -215,10 +167,10 @@ func TestPathTraversalRejected(t *testing.T) {
 func TestListSkipsHiddenAndMeta(t *testing.T) {
 	s := newTestStore(t)
 	mustCreateSilo(t, s, "demo")
-	if _, err := s.Create("demo", "index.html", "<h1>hi</h1>", false); err != nil {
+	if _, err := s.Create("demo", "index.html", "<h1>hi</h1>"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Create("demo", "nested/style.css", "a{}", false); err != nil {
+	if _, err := s.Create("demo", "nested/style.css", "a{}"); err != nil {
 		t.Fatal(err)
 	}
 	files, err := s.List("demo", "")
@@ -247,94 +199,11 @@ func TestListSkipsHiddenAndMeta(t *testing.T) {
 func TestListFileOnFileFails(t *testing.T) {
 	s := newTestStore(t)
 	mustCreateSilo(t, s, "demo")
-	if _, err := s.Create("demo", "a.txt", "x", false); err != nil {
+	if _, err := s.Create("demo", "a.txt", "x"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.List("demo", "a.txt"); !errors.Is(err, ErrIsFile) {
 		t.Fatalf("expected ErrIsFile, got %v", err)
-	}
-}
-
-func TestResolveIndexByHeader(t *testing.T) {
-	s := newTestStore(t)
-	mustCreateSilo(t, s, "demo")
-	for _, f := range []string{"index.html", "index.mobile.html", "index.desktop.html"} {
-		if _, err := s.Create("demo", f, "<h1>"+f+"</h1>", false); err != nil {
-			t.Fatal(err)
-		}
-	}
-	m, err := s.Meta("demo")
-	if err != nil {
-		t.Fatal(err)
-	}
-	m.IndexRules = []IndexRule{
-		{Header: "X-Index-Variant", Value: "mobile", File: "index.mobile.html"},
-		{Header: "X-Index-Variant", Value: "desktop", File: "index.desktop.html", Redirect: true},
-		{Header: "User-Agent", Pattern: "(?i)iphone|android", File: "index.mobile.html"},
-	}
-	if err := s.SaveMeta("demo", m); err != nil {
-		t.Fatal(err)
-	}
-
-	hdr := http.Header{}
-
-	// Default: no header -> index.html.
-	f, redir, err := s.ResolveIndex("demo", "", hdr)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if f != "index.html" || redir {
-		t.Fatalf("expected index.html, got %q redir=%v", f, redir)
-	}
-
-	// Explicit variant header.
-	hdr.Set("X-Index-Variant", "mobile")
-	f, redir, err = s.ResolveIndex("demo", "", hdr)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if f != "index.mobile.html" || redir {
-		t.Fatalf("expected index.mobile.html, got %q redir=%v", f, redir)
-	}
-
-	// Redirect rule honored.
-	hdr.Set("X-Index-Variant", "desktop")
-	f, redir, err = s.ResolveIndex("demo", "", hdr)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if f != "index.desktop.html" || !redir {
-		t.Fatalf("expected index.desktop.html with redirect, got %q redir=%v", f, redir)
-	}
-
-	// User-Agent pattern.
-	hdr = http.Header{}
-	hdr.Set("User-Agent", "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)")
-	f, _, err = s.ResolveIndex("demo", "", hdr)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if f != "index.mobile.html" {
-		t.Fatalf("expected mobile via User-Agent, got %q", f)
-	}
-
-	// Subdirectory resolution with rules present.
-	if _, err := s.Create("demo", "sub/index.html", "x", false); err != nil {
-		t.Fatal(err)
-	}
-	hdr = http.Header{}
-	f, _, err = s.ResolveIndex("demo", "sub", hdr)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if f != "index.html" {
-		t.Fatalf("expected sub/index.html, got %q", f)
-	}
-
-	// Missing index document.
-	hdr = http.Header{}
-	if _, _, err := s.ResolveIndex("demo", "does-not-exist", hdr); err == nil {
-		t.Fatal("expected error for missing index")
 	}
 }
 
@@ -402,7 +271,7 @@ func TestMetaMissingReturnsDefault(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m.TemplateRoutes == nil || m.Encrypted == nil {
+	if m.TemplateRoutes == nil {
 		t.Fatal("default meta must have initialized maps")
 	}
 }

@@ -1,30 +1,28 @@
 package song
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
-	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-)
 
-const testSecret = "test-secret-key-0123456789abcdefghij"
+	"azzurrotech/song/pkg/component"
+)
 
 func newTestSong(t *testing.T) *Song {
 	t.Helper()
-	s, err := New(Config{Root: filepath.Join(t.TempDir(), "data"), Secret: testSecret})
+	s, err := New(Config{Root: filepath.Join(t.TempDir(), "data")})
 	if err != nil {
 		t.Fatal(err)
 	}
 	return s
 }
 
+// do issues a request against h and returns the recorded response.
 func do(t *testing.T, h http.Handler, method, target string, body io.Reader, hdrs map[string]string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(method, target, body)
@@ -36,15 +34,6 @@ func do(t *testing.T, h http.Handler, method, target string, body io.Reader, hdr
 	return rec
 }
 
-func jsonBody(t *testing.T, v any) io.Reader {
-	t.Helper()
-	b, err := json.Marshal(v)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return bytes.NewReader(b)
-}
-
 func decodeResp(t *testing.T, rec *httptest.ResponseRecorder, v any) {
 	t.Helper()
 	if err := json.Unmarshal(rec.Body.Bytes(), v); err != nil {
@@ -52,355 +41,40 @@ func decodeResp(t *testing.T, rec *httptest.ResponseRecorder, v any) {
 	}
 }
 
-func createDemoSilo(t *testing.T, s *Song) (h http.Handler, name string) {
+// newDemoSilo registers the "demo" silo in the store and returns the song
+// Handler plus the silo name. Silos are directories under the store root, so
+// tests set them up through the store rather than through an HTTP API.
+func newDemoSilo(t *testing.T, s *Song) (h http.Handler, name string) {
 	t.Helper()
-	h = s.Handler()
-	if rec := do(t, h, http.MethodPost, "/api/song/silos", strings.NewReader("name=demo"),
-		map[string]string{"Content-Type": "application/x-www-form-urlencoded"}); rec.Code != http.StatusCreated {
-		t.Fatalf("create silo: status %d body %s", rec.Code, rec.Body.String())
+	if err := s.store.CreateSilo("demo"); err != nil {
+		t.Fatalf("create silo: %v", err)
 	}
-	// Set base URL for the silo (required for file operations)
-	if rec := do(t, h, http.MethodPut, "/api/song/silos/demo/base-url",
-		strings.NewReader(`{"base_url": "/c/demo/"}`),
-		map[string]string{"Content-Type": "application/json"}); rec.Code != http.StatusOK {
-		t.Fatalf("set base URL: status %d body %s", rec.Code, rec.Body.String())
-	}
-	return h, "demo"
+	return s.Handler(), "demo"
 }
 
-func TestHealth(t *testing.T) {
-	s := newTestSong(t)
-	h := s.Handler()
-	rec := do(t, h, http.MethodGet, "/health", nil, nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("health status %d", rec.Code)
-	}
-	var body map[string]any
-	decodeResp(t, rec, &body)
-	if body["service"] != "song" || body["status"] != "healthy" {
-		t.Fatalf("unexpected health: %v", body)
-	}
-}
-
-func TestAPISilosLifecycle(t *testing.T) {
-	s := newTestSong(t)
-	h := s.Handler()
-
-	// Create via JSON.
-	if rec := do(t, h, http.MethodPost, "/api/song/silos", jsonBody(t, map[string]string{"name": "web"}),
-		map[string]string{"Content-Type": "application/json"}); rec.Code != http.StatusCreated {
-		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
-	}
-	// Duplicate -> 409.
-	if rec := do(t, h, http.MethodPost, "/api/song/silos", strings.NewReader("name=web"),
-		map[string]string{"Content-Type": "application/x-www-form-urlencoded"}); rec.Code != http.StatusConflict {
-		t.Fatalf("duplicate should be 409, got %d", rec.Code)
-	}
-	// Reserved name rejected.
-	if rec := do(t, h, http.MethodPost, "/api/song/silos", strings.NewReader("name=api"), nil); rec.Code != http.StatusBadRequest {
-		t.Fatalf("reserved name should be 400, got %d", rec.Code)
-	}
-	// List.
-	var listed struct {
-		Silos []struct {
-			Name string `json:"name"`
-		} `json:"silos"`
-	}
-	if rec := do(t, h, http.MethodGet, "/api/song/silos", nil, nil); rec.Code != http.StatusOK {
-		t.Fatalf("list: %d", rec.Code)
-	} else {
-		decodeResp(t, rec, &listed)
-	}
-	if len(listed.Silos) != 1 || listed.Silos[0].Name != "web" {
-		t.Fatalf("unexpected silos: %+v", listed.Silos)
-	}
-	// Delete.
-	if rec := do(t, h, http.MethodDelete, "/api/song/silos/web", nil, nil); rec.Code != http.StatusOK {
-		t.Fatalf("delete: %d %s", rec.Code, rec.Body.String())
-	}
-	if rec := do(t, h, http.MethodDelete, "/api/song/silos/web", nil, nil); rec.Code != http.StatusNotFound {
-		t.Fatalf("delete missing should be 404, got %d", rec.Code)
-	}
-}
-
-func TestFileCRUDViaJSON(t *testing.T) {
-	s := newTestSong(t)
-	h, silo := createDemoSilo(t, s)
-
-	// Create.
-	rec := do(t, h, http.MethodPost, "/api/song/silos/"+silo+"/file", jsonBody(t, map[string]any{
-		"path": "index.html", "content": "<h1>Hi</h1>",
-	}), map[string]string{"Content-Type": "application/json"})
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("create file: %d %s", rec.Code, rec.Body.String())
-	}
-	// Duplicate -> 409.
-	if rec := do(t, h, http.MethodPost, "/api/song/silos/"+silo+"/file", jsonBody(t, map[string]any{
-		"path": "index.html", "content": "x",
-	}), map[string]string{"Content-Type": "application/json"}); rec.Code != http.StatusConflict {
-		t.Fatalf("duplicate file should be 409, got %d", rec.Code)
-	}
-	// Serve it.
-	if rec := do(t, h, http.MethodGet, "/"+silo+"/index.html", nil, nil); rec.Code != http.StatusOK {
-		t.Fatalf("serve: %d %s", rec.Code, rec.Body.String())
-	} else if rec.Body.String() != "<h1>Hi</h1>" {
-		t.Fatalf("content mismatch: %q", rec.Body.String())
-	} else if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
-		t.Fatalf("content type: %q", ct)
-	}
-	// List.
-	rec = do(t, h, http.MethodGet, "/api/song/silos/"+silo+"/files", nil, nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("list files: %d", rec.Code)
-	}
-	var listing struct {
-		Files []struct {
-			Name string `json:"name"`
-			Path string `json:"path"`
-		} `json:"files"`
-	}
-	decodeResp(t, rec, &listing)
-	if len(listing.Files) != 1 || listing.Files[0].Name != "index.html" {
-		t.Fatalf("unexpected listing: %+v", listing.Files)
-	}
-	// Read with content via API.
-	rec = do(t, h, http.MethodGet, "/api/song/silos/"+silo+"/file?path=index.html&content=1", nil, nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("read: %d", rec.Code)
-	}
-	var readResp struct {
-		Content string `json:"content"`
-	}
-	decodeResp(t, rec, &readResp)
-	if readResp.Content != "<h1>Hi</h1>" {
-		t.Fatalf("read content: %q", readResp.Content)
-	}
-	// Update.
-	rec = do(t, h, http.MethodPut, "/api/song/silos/"+silo+"/file", jsonBody(t, map[string]any{
-		"path": "index.html", "content": "<h1>Bye</h1>",
-	}), map[string]string{"Content-Type": "application/json"})
-	if rec.Code != http.StatusOK {
-		t.Fatalf("update: %d %s", rec.Code, rec.Body.String())
-	}
-	if rec := do(t, h, http.MethodGet, "/"+silo+"/index.html", nil, nil); rec.Body.String() != "<h1>Bye</h1>" {
-		t.Fatalf("update not reflected: %q", rec.Body.String())
-	}
-	// Delete.
-	if rec := do(t, h, http.MethodDelete, "/api/song/silos/"+silo+"/file?path=index.html", nil, nil); rec.Code != http.StatusOK {
-		t.Fatalf("delete: %d %s", rec.Code, rec.Body.String())
-	}
-	if rec := do(t, h, http.MethodDelete, "/api/song/silos/"+silo+"/file?path=index.html", nil, nil); rec.Code != http.StatusNotFound {
-		t.Fatalf("double delete should be 404, got %d", rec.Code)
-	}
-}
-
-func TestFileCRUDViaFormAndRaw(t *testing.T) {
-	s := newTestSong(t)
-	h, silo := createDemoSilo(t, s)
-
-	// HTML form (urlencoded).
-	form := "path=app.js&content=console.log(1)&encrypt=true"
-	rec := do(t, h, http.MethodPost, "/api/song/silos/"+silo+"/file", strings.NewReader(form),
-		map[string]string{"Content-Type": "application/x-www-form-urlencoded"})
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("form create: %d %s", rec.Code, rec.Body.String())
-	}
-	var created struct {
-		File struct {
-			Encrypted bool `json:"encrypted"`
-		} `json:"file"`
-	}
-	decodeResp(t, rec, &created)
-	if !created.File.Encrypted {
-		t.Fatal("form-created file should be encrypted")
-	}
-
-	// Encrypted file serves decrypted content over HTTP.
-	rec = do(t, h, http.MethodGet, "/"+silo+"/app.js", nil, nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("serve encrypted: %d %s", rec.Code, rec.Body.String())
-	}
-	if rec.Body.String() != "console.log(1)" {
-		t.Fatalf("decrypted content mismatch: %q", rec.Body.String())
-	}
-	if rec.Header().Get("X-Song-Encrypted") != "1" {
-		t.Fatal("expected X-Song-Encrypted header")
-	}
-	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "javascript") {
-		t.Fatalf("js content type: %q", ct)
-	}
-
-	// On-disk must be ciphertext.
-	raw, err := os.ReadFile(filepath.Join(s.store.Root(), silo, "app.js"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(raw), "console.log") {
-		t.Fatal("plaintext leaked to disk")
-	}
-
-	// Raw body create with path from query.
-	rawBody := strings.NewReader("Hello from raw body")
-	rec = do(t, h, http.MethodPost, "/api/song/silos/"+silo+"/file?path=raw.txt", rawBody,
-		map[string]string{"Content-Type": "text/plain"})
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("raw create: %d %s", rec.Code, rec.Body.String())
-	}
-	if rec := do(t, h, http.MethodGet, "/"+silo+"/raw.txt", nil, nil); rec.Body.String() != "Hello from raw body" {
-		t.Fatalf("raw content mismatch: %q", rec.Body.String())
-	}
-}
-
-func TestMultipartUpload(t *testing.T) {
-	s := newTestSong(t)
-	h, silo := createDemoSilo(t, s)
-
-	var buf bytes.Buffer
-	mw := multipart.NewWriter(&buf)
-	mw.WriteField("dir", "assets")
-	fw, _ := mw.CreateFormFile("file", "logo.svg")
-	fw.Write([]byte("<svg/>"))
-	mw.Close()
-
-	rec := do(t, h, http.MethodPost, "/api/song/silos/"+silo+"/upload", &buf,
-		map[string]string{"Content-Type": mw.FormDataContentType()})
-	if rec.Code != http.StatusOK {
-		t.Fatalf("upload: %d %s", rec.Code, rec.Body.String())
-	}
-	var uploads struct {
-		Uploads []struct {
-			Path  string `json:"path"`
-			Error string `json:"error"`
-		} `json:"uploads"`
-	}
-	decodeResp(t, rec, &uploads)
-	if len(uploads.Uploads) != 1 || uploads.Uploads[0].Error != "" {
-		t.Fatalf("unexpected uploads: %+v", uploads.Uploads)
-	}
-	if rec := do(t, h, http.MethodGet, "/"+silo+"/assets/logo.svg", nil, nil); rec.Code != http.StatusOK {
-		t.Fatalf("serve uploaded: %d %s", rec.Code, rec.Body.String())
-	}
-}
-
-func TestIndexRedirectByHeader(t *testing.T) {
-	s := newTestSong(t)
-	h, silo := createDemoSilo(t, s)
-	mustPut(t, h, "/api/song/silos/"+silo+"/file", map[string]any{
-		"path": "index.html", "content": "default-index",
-	})
-	mustPut(t, h, "/api/song/silos/"+silo+"/file", map[string]any{
-		"path": "index.mobile.html", "content": "mobile-index",
-	})
-	mustPut(t, h, "/api/song/silos/"+silo+"/file", map[string]any{
-		"path": "index.desktop.html", "content": "desktop-index",
-	})
-
-	// IndexRules drive header-based index document selection.
-	if rec := do(t, h, http.MethodPut, "/api/song/silos/"+silo+"/meta", jsonBody(t, map[string]any{
-		"index_rules": []map[string]any{
-			{"header": "X-Index-Variant", "value": "mobile", "file": "index.mobile.html"},
-			{"header": "X-Index-Variant", "value": "desktop", "file": "index.desktop.html"},
-			{"header": "User-Agent", "pattern": "(?i)mobile|android|iphone", "file": "index.mobile.html"},
-		},
-	}), map[string]string{"Content-Type": "application/json"}); rec.Code != http.StatusOK {
-		t.Fatalf("set index meta: %d %s", rec.Code, rec.Body.String())
-	}
-
-	// No header -> index.html.
-	if rec := do(t, h, http.MethodGet, "/"+silo+"/", nil, nil); rec.Body.String() != "default-index" {
-		t.Fatalf("default index: %q", rec.Body.String())
-	}
-	// Variant header -> index.mobile.html.
-	if rec := do(t, h, http.MethodGet, "/"+silo+"/", nil, map[string]string{
-		"X-Index-Variant": "mobile",
-	}); rec.Body.String() != "mobile-index" {
-		t.Fatalf("mobile index: %q status %d", rec.Body.String(), rec.Code)
-	}
-	// User-Agent pattern.
-	if rec := do(t, h, http.MethodGet, "/"+silo+"/", nil, map[string]string{
-		"User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17)",
-	}); rec.Body.String() != "mobile-index" {
-		t.Fatalf("ua index: %q", rec.Body.String())
-	}
-	// No trailing slash on a file is served directly.
-	if rec := do(t, h, http.MethodGet, "/"+silo+"/index.mobile.html", nil, nil); rec.Body.String() != "mobile-index" {
-		t.Fatalf("direct file: %q", rec.Body.String())
-	}
-}
-
-func mustPut(t *testing.T, h http.Handler, target string, payload map[string]any) {
+// putFile writes a resource into a silo directly through the store.
+func putFile(t *testing.T, s *Song, silo, rel, content string) {
 	t.Helper()
-	rec := do(t, h, http.MethodPost, target, jsonBody(t, payload),
-		map[string]string{"Content-Type": "application/json"})
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("mustPut %s: %d %s", target, rec.Code, rec.Body.String())
+	if _, err := s.store.Create(silo, rel, content); err != nil {
+		t.Fatalf("create %s/%s: %v", silo, rel, err)
 	}
 }
 
-func TestServerSideRender(t *testing.T) {
-	s := newTestSong(t)
-	h, silo := createDemoSilo(t, s)
-
-	// Templates live in the silo.
-	if rec := do(t, h, http.MethodPost, "/api/song/silos/"+silo+"/file", strings.NewReader(`path=.templates/layout.tmpl&content=`+
-		`{{define "layout"}}<html><head><title>{{block "title" .}}t{{end}}</title></head><body>{{template "content" .}}|{{upper (default "" .title)}}|{{json .}}</body></html>{{end}}`),
-		map[string]string{"Content-Type": "application/x-www-form-urlencoded"}); rec.Code != http.StatusCreated {
-		t.Fatalf("create layout: %d %s", rec.Code, rec.Body.String())
-	}
-	if rec := do(t, h, http.MethodPost, "/api/song/silos/"+silo+"/file", strings.NewReader(`path=.templates/page.tmpl&content=`+
-		`{{define "page"}}{{template "layout" .}}{{end}}{{define "content"}}Hello {{.name}}{{end}}`),
-		map[string]string{"Content-Type": "application/x-www-form-urlencoded"}); rec.Code != http.StatusCreated {
-		t.Fatalf("create page: %d %s", rec.Code, rec.Body.String())
-	}
-
-	// Render via JSON body.
-	rec := do(t, h, http.MethodPost, "/api/song/silos/"+silo+"/render", jsonBody(t, map[string]any{
-		"template": "page",
-		"data":     map[string]any{"name": "Song", "title": "Song"},
-	}), map[string]string{"Content-Type": "application/json"})
-	if rec.Code != http.StatusOK {
-		t.Fatalf("render: %d %s", rec.Code, rec.Body.String())
-	}
-	body := rec.Body.String()
-	if !strings.Contains(body, "Hello Song") || !strings.Contains(body, "SONG") {
-		t.Fatalf("render output: %q", body)
-	}
-	if !strings.Contains(body, "&#34;name&#34;") || !strings.Contains(body, "&#34;Song&#34;") {
-		t.Fatalf("json func should serialize data (escaped in html context): %q", body)
-	}
-	// Typed json inside <body> gets escaped by the html context; fine.
-
-	// Render via HTML form.
-	rec = do(t, h, http.MethodPost, "/api/song/silos/"+silo+"/render", strings.NewReader("template=page&name=Form"),
-		map[string]string{"Content-Type": "application/x-www-form-urlencoded"})
-	if !strings.Contains(rec.Body.String(), "Hello Form") {
-		t.Fatalf("form render: %q", rec.Body.String())
-	}
-
-	// Render via GET with query params.
-	rec = do(t, h, http.MethodGet, "/api/song/silos/"+silo+"/render?template=page&name=Query", nil, nil)
-	if !strings.Contains(rec.Body.String(), "Hello Query") {
-		t.Fatalf("get render: %q", rec.Body.String())
-	}
-
-	// Template route registered in meta + served at /silo/route.
-	if rec := do(t, h, http.MethodPut, "/api/song/silos/"+silo+"/meta", jsonBody(t, map[string]any{
-		"template_routes": map[string]string{"greet": "page"},
-	}), map[string]string{"Content-Type": "application/json"}); rec.Code != http.StatusOK {
-		t.Fatalf("set meta: %d %s", rec.Code, rec.Body.String())
-	}
-	rec = do(t, h, http.MethodGet, "/"+silo+"/greet?name=Route", nil, nil)
-	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "Hello Route") {
-		t.Fatalf("route render: %d %q", rec.Code, rec.Body.String())
-	}
-	if rec.Header().Get("X-Song-Template") != "page" {
-		t.Fatal("missing X-Song-Template header")
+// templateRoute registers a server-side template route in the silo metadata.
+func templateRoute(t *testing.T, s *Song, silo, route, tpl string) {
+	t.Helper()
+	if err := s.store.SetTemplateRoute(silo, route, tpl); err != nil {
+		t.Fatalf("set template route %q: %v", route, err)
 	}
 }
 
+// TestMiddlewareDelegation covers the README's middleware design: song serves
+// only the paths it owns (registered silos, the Web Component runtime) and
+// delegates everything else to the next handler untouched.
 func TestMiddlewareDelegation(t *testing.T) {
 	s := newTestSong(t)
-	_, _ = createDemoSilo(t, s)
+	_, silo := newDemoSilo(t, s)
+	putFile(t, s, silo, "index.html", "<h1>demo</h1>")
 
 	host := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Host", "yes")
@@ -408,151 +82,303 @@ func TestMiddlewareDelegation(t *testing.T) {
 	})
 	h := s.Middleware(host)
 
-	// Owned routes.
-	rec := do(t, h, http.MethodGet, "/health", nil, nil)
-	if rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), "host:") {
-		t.Fatalf("health should be owned: %d %s", rec.Code, rec.Body.String())
+	// Owned routes are served by song, never reaching the host.
+	if rec := do(t, h, http.MethodGet, "/"+silo+"/", nil, nil); rec.Code != http.StatusOK ||
+		strings.Contains(rec.Body.String(), "host:") {
+		t.Fatalf("silo must be owned by song: %d %q", rec.Code, rec.Body.String())
 	}
-	rec = do(t, h, http.MethodGet, "/api/song/silos", nil, nil)
-	if rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), "host:") {
-		t.Fatalf("api should be owned: %d", rec.Code)
+	if rec := do(t, h, http.MethodGet, component.RuntimePath, nil, nil); strings.Contains(rec.Body.String(), "host:") {
+		t.Fatal("component runtime must be owned by song")
 	}
-	if rec := do(t, h, http.MethodGet, "/demo/", nil, nil); rec.Code != http.StatusNotFound {
-		t.Fatalf("silo without index should 404 via song: %d", rec.Code)
-	}
-	// Delegated routes.
-	rec = do(t, h, http.MethodGet, "/", nil, nil)
+	// Everything else falls through to the host.
+	rec := do(t, h, http.MethodGet, "/", nil, nil)
 	if rec.Body.String() != "host:/" || rec.Header().Get("X-Host") != "yes" {
 		t.Fatalf("root must be delegated: %q", rec.Body.String())
 	}
-	rec = do(t, h, http.MethodGet, "/some/other/path", nil, nil)
-	if rec.Body.String() != "host:/some/other/path" {
+	if rec := do(t, h, http.MethodGet, "/some/other/path", nil, nil); rec.Body.String() != "host:/some/other/path" {
 		t.Fatalf("non-silo path must be delegated: %q", rec.Body.String())
 	}
+	// An unknown first segment is not a silo, so it is delegated too.
+	if rec := do(t, h, http.MethodGet, "/nope/x", nil, nil); rec.Body.String() != "host:/nope/x" {
+		t.Fatalf("unknown silo must be delegated: %q", rec.Body.String())
+	}
 	// Reserved path segments never become silos.
-	rec = do(t, h, http.MethodGet, "/api/whatever", nil, nil)
-	if rec.Body.String() != "host:/api/whatever" {
-		t.Fatalf("/api must not be treated as a silo: %q", rec.Body.String())
+	if rec := do(t, h, http.MethodGet, "/api/whatever", nil, nil); rec.Body.String() != "host:/api/whatever" {
+		t.Fatalf("reserved segment must not be treated as a silo: %q", rec.Body.String())
 	}
 }
 
-func TestAdminUI(t *testing.T) {
+// TestStaticResourceUpsert covers the README's GET/POST surface: a POST to
+// /{silo}/{path} creates the resource from the raw request body and replaces it
+// on the next POST, while GET serves it back.
+func TestStaticResourceUpsert(t *testing.T) {
 	s := newTestSong(t)
-	h := s.Handler()
-	rec := do(t, h, http.MethodGet, "/admin/", nil, nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("admin ui: %d", rec.Code)
+	h, silo := newDemoSilo(t, s)
+
+	rec := do(t, h, http.MethodPost, "/"+silo+"/greeting.txt", strings.NewReader("hello v1"), nil)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create resource: %d %s", rec.Code, rec.Body.String())
 	}
-	if !strings.Contains(rec.Body.String(), "song") {
-		t.Fatal("admin ui body missing")
+	rec = do(t, h, http.MethodGet, "/"+silo+"/greeting.txt", nil, nil)
+	if rec.Code != http.StatusOK || rec.Body.String() != "hello v1" {
+		t.Fatalf("GET after create: %d %q", rec.Code, rec.Body.String())
 	}
-	if rec := do(t, h, http.MethodGet, "/admin/app.js", nil, nil); rec.Code != http.StatusOK {
-		t.Fatalf("admin js: %d", rec.Code)
+	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/plain") {
+		t.Fatalf("content type: %q", ct)
 	}
 
-	// Disabled UI.
-	s2, err := New(Config{Root: filepath.Join(t.TempDir(), "d"), Secret: testSecret, DisableUI: true})
+	rec = do(t, h, http.MethodPost, "/"+silo+"/greeting.txt", strings.NewReader("hello v2"), nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("update resource: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := do(t, h, http.MethodGet, "/"+silo+"/greeting.txt", nil, nil); rec.Body.String() != "hello v2" {
+		t.Fatalf("GET after update: %q", rec.Body.String())
+	}
+
+	// Traversal through the upsert surface is rejected.
+	if rec := do(t, h, http.MethodPost, "/"+silo+"/../evil", strings.NewReader("x"), nil); rec.Code == http.StatusCreated {
+		t.Fatal("path traversal must be rejected")
+	}
+	if rec := do(t, h, http.MethodPost, "/"+silo+"/.song%2Fmeta.json", strings.NewReader("x"), nil); rec.Code == http.StatusCreated {
+		t.Fatal("writing into the metadata tree must be rejected")
+	}
+	// A missing silo falls through (server mode -> 404).
+	if rec := do(t, h, http.MethodPost, "/nope/file.txt", strings.NewReader("x"), nil); rec.Code != http.StatusNotFound {
+		t.Fatalf("missing silo: %d", rec.Code)
+	}
+}
+
+// TestDirectoryServesIndex proves a directory request serves its index.html.
+func TestDirectoryServesIndex(t *testing.T) {
+	s := newTestSong(t)
+	h, silo := newDemoSilo(t, s)
+	putFile(t, s, silo, "index.html", "<h1>home</h1>")
+	putFile(t, s, silo, "sub/index.html", "<h1>sub</h1>")
+
+	rec := do(t, h, http.MethodGet, "/"+silo+"/", nil, nil)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "home") {
+		t.Fatalf("root index: %d %q", rec.Code, rec.Body.String())
+	}
+	rec = do(t, h, http.MethodGet, "/"+silo+"/sub/", nil, nil)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "sub") {
+		t.Fatalf("sub index: %d %q", rec.Code, rec.Body.String())
+	}
+	// A directory without an index document is a 404, not an endless redirect.
+	if rec := do(t, h, http.MethodGet, "/"+silo+"/empty/", nil, nil); rec.Code != http.StatusNotFound {
+		t.Fatalf("directory without index: %d", rec.Code)
+	}
+}
+
+// TestHTMLComponentServing proves any served HTML file that uses a system tag
+// gets the component definitions and runtime injected, while plain HTML is
+// served byte-for-byte.
+func TestHTMLComponentServing(t *testing.T) {
+	s := newTestSong(t)
+	h, silo := newDemoSilo(t, s)
+
+	componentHTML := `<!DOCTYPE html><html><body><h1>Widget</h1><song-badge>New</song-badge></body></html>`
+	if rec := do(t, h, http.MethodPost, "/"+silo+"/widget.html", strings.NewReader(componentHTML), nil); rec.Code != http.StatusCreated {
+		t.Fatalf("create widget: %d %s", rec.Code, rec.Body.String())
+	}
+	rec := do(t, h, http.MethodGet, "/"+silo+"/widget.html", nil, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET widget: %d", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `<song-badge>New</song-badge>`) {
+		t.Fatalf("original markup must be preserved: %q", body)
+	}
+	if !strings.Contains(body, `data-song-component="song-badge"`) {
+		t.Fatalf("component definitions must be injected: %q", body)
+	}
+	if !strings.Contains(body, component.RuntimePath) {
+		t.Fatalf("runtime script must be injected: %q", body)
+	}
+	if rec.Header().Get("X-Song-Template-Processed") != "1" {
+		t.Fatal("expected X-Song-Template-Processed")
+	}
+
+	if rec := do(t, h, http.MethodPost, "/"+silo+"/plain.html", strings.NewReader("<p>plain</p>"), nil); rec.Code != http.StatusCreated {
+		t.Fatalf("create plain: %d", rec.Code)
+	}
+	rec = do(t, h, http.MethodGet, "/"+silo+"/plain.html", nil, nil)
+	if rec.Body.String() != "<p>plain</p>" {
+		t.Fatalf("plain html must be untouched: %q", rec.Body.String())
+	}
+	if rec.Header().Get("X-Song-Template-Processed") != "" {
+		t.Fatal("plain html must not be template-processed")
+	}
+
+	// A component page that is not valid Go template syntax is still served
+	// with the component definitions injected.
+	broken := `<song-badge>x</song-badge>{{if}}`
+	if rec := do(t, h, http.MethodPost, "/"+silo+"/broken.html", strings.NewReader(broken), nil); rec.Code != http.StatusCreated {
+		t.Fatalf("create broken: %d", rec.Code)
+	}
+	rec = do(t, h, http.MethodGet, "/"+silo+"/broken.html", nil, nil)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `data-song-component="song-badge"`) {
+		t.Fatalf("broken component page must still inject: %d %q", rec.Code, rec.Body.String())
+	}
+}
+
+// TestComponentRuntimeRoutes proves the baseline runtime and the tag
+// definitions are served by song itself.
+func TestComponentRuntimeRoutes(t *testing.T) {
+	s := newTestSong(t)
+	h := s.Handler()
+	rec := do(t, h, http.MethodGet, component.RuntimePath, nil, nil)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "customElements.define") {
+		t.Fatalf("runtime: %d %q", rec.Code, rec.Body.String())
+	}
+	rec = do(t, h, http.MethodGet, component.DefinitionsPath, nil, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("definitions: %d", rec.Code)
+	}
+	var defs struct {
+		Count int `json:"count"`
+		Tags  []struct {
+			Name string `json:"name"`
+		} `json:"tags"`
+	}
+	decodeResp(t, rec, &defs)
+	if defs.Count == 0 || len(defs.Tags) != defs.Count {
+		t.Fatalf("unexpected definitions: %+v", defs)
+	}
+	// The runtime path is owned by song in middleware mode.
+	host := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, "host") })
+	if rec := do(t, s.Middleware(host), http.MethodGet, component.RuntimePath, nil, nil); rec.Body.String() == "host" {
+		t.Fatal("runtime must be owned by song, not delegated")
+	}
+}
+
+// TestServerSideRender covers the README's template processing: a named Go
+// template stored in the silo is rendered server-side and served over GET.
+func TestServerSideRender(t *testing.T) {
+	s := newTestSong(t)
+	h, silo := newDemoSilo(t, s)
+	putFile(t, s, silo, ".templates/layout.tmpl",
+		`{{define "layout"}}<html><head><title>{{block "title" .}}t{{end}}</title></head><body>{{template "content" .}}|{{upper (default "" .title)}}|{{json .}}</body></html>{{end}}`)
+	putFile(t, s, silo, ".templates/page.tmpl",
+		`{{define "page"}}{{template "layout" .}}{{end}}{{define "content"}}Hello {{.name}}{{end}}`)
+	templateRoute(t, s, silo, "greet", "page")
+
+	rec := do(t, h, http.MethodGet, "/"+silo+"/greet?name=Route&title=Song", nil, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("render: %d %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "Hello Route") || !strings.Contains(body, "SONG") {
+		t.Fatalf("render output: %q", body)
+	}
+	// The json func output is escaped by the html/template context.
+	if !strings.Contains(body, "&#34;name&#34;") || !strings.Contains(body, "&#34;Route&#34;") {
+		t.Fatalf("json func should serialize data (escaped in html context): %q", body)
+	}
+	if rec.Header().Get("X-Song-Template") != "page" {
+		t.Fatal("missing X-Song-Template header")
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
+		t.Fatalf("html content type: %q", ct)
+	}
+}
+
+// TestTextTemplateRendering proves .txt templates are processed with
+// text/template (no HTML escaping) and reported as text/plain.
+func TestTextTemplateRendering(t *testing.T) {
+	s := newTestSong(t)
+	h, silo := newDemoSilo(t, s)
+	putFile(t, s, silo, ".templates/note.txt", `{{define "note"}}plain {{.text}}{{end}}`)
+	templateRoute(t, s, silo, "note", "note")
+
+	rec := do(t, h, http.MethodGet, "/"+silo+"/note?text=%3Cb%3E", nil, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("render text: %d %s", rec.Code, rec.Body.String())
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/plain") {
+		t.Fatalf("text content type: %q", ct)
+	}
+	if !strings.Contains(rec.Body.String(), "plain <b>") {
+		t.Fatalf("text template must not HTML-escape: %q", rec.Body.String())
+	}
+	if rec.Header().Get("X-Song-Template") != "note" {
+		t.Fatal("missing X-Song-Template header")
+	}
+}
+
+// TestServerSideComponentTag proves system component tags resolve inside a
+// silo's server-rendered HTML templates.
+func TestServerSideComponentTag(t *testing.T) {
+	s := newTestSong(t)
+	h, silo := newDemoSilo(t, s)
+	putFile(t, s, silo, ".templates/page.html",
+		`{{define "page"}}<main>{{template "song-card" .}}</main>{{end}}`)
+	templateRoute(t, s, silo, "page", "page")
+	rec := do(t, h, http.MethodGet, "/"+silo+"/page", nil, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("render: %d %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `<slot name="title">`) {
+		t.Fatalf("system component markup missing: %q", rec.Body.String())
+	}
+}
+
+// TestRenderErrorsAreSurfaced proves a broken template route reports the
+// failure instead of silently serving the wrong thing.
+func TestRenderErrorsAreSurfaced(t *testing.T) {
+	s := newTestSong(t)
+	h, silo := newDemoSilo(t, s)
+	templateRoute(t, s, silo, "missing", "nope")
+	rec := do(t, h, http.MethodGet, "/"+silo+"/missing", nil, nil)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("missing template should 500, got %d %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "render error") {
+		t.Fatalf("error should be surfaced: %q", rec.Body.String())
+	}
+}
+
+// TestUnknownPathsAreNotFound proves paths song does not own produce a 404 in
+// server mode rather than an accidental listing or redirect.
+func TestUnknownPathsAreNotFound(t *testing.T) {
+	s := newTestSong(t)
+	h := s.Handler()
+	if rec := do(t, h, http.MethodGet, "/", nil, nil); rec.Code != http.StatusNotFound {
+		t.Fatalf("root: %d", rec.Code)
+	}
+	if rec := do(t, h, http.MethodGet, "/demo/anything", nil, nil); rec.Code != http.StatusNotFound {
+		t.Fatalf("unknown silo: %d", rec.Code)
+	}
+}
+
+// TestConfigComponents proves a host can register its own web component and
+// immediately use it both server-side and in served HTML.
+func TestConfigComponents(t *testing.T) {
+	s, err := New(Config{
+		Root: filepath.Join(t.TempDir(), "data"),
+		Components: []component.Tag{
+			{Name: "host-chip", Markup: "<strong>{{.}}</strong>"},
+		},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	h2 := s2.Handler()
-	if rec := do(t, h2, http.MethodGet, "/admin/", nil, nil); rec.Code != http.StatusNotFound {
-		t.Fatalf("admin should be disabled: %d", rec.Code)
+	if _, ok := s.Components().Get("host-chip"); !ok {
+		t.Fatal("host component not registered")
 	}
-}
-
-func TestMagicLinkAPI(t *testing.T) {
-	s := newTestSong(t)
-	h := s.Handler()
-	rec := do(t, h, http.MethodPost, "/api/auth/generate", jsonBody(t, map[string]string{
-		"user_id": "a@example.com",
-	}), map[string]string{"Content-Type": "application/json"})
-	if rec.Code != http.StatusOK {
-		t.Fatalf("generate: %d %s", rec.Code, rec.Body.String())
+	h, silo := newDemoSilo(t, s)
+	// Client side: a served HTML file using the custom element is injected.
+	if rec := do(t, h, http.MethodPost, "/"+silo+"/chip.html", strings.NewReader("<host-chip>x</host-chip>"), nil); rec.Code != http.StatusCreated {
+		t.Fatalf("create: %d", rec.Code)
 	}
-	var gen struct {
-		MagicLink string `json:"magic_link"`
+	rec := do(t, h, http.MethodGet, "/"+silo+"/chip.html", nil, nil)
+	if !strings.Contains(rec.Body.String(), `data-song-component="host-chip"`) {
+		t.Fatalf("host component not injected: %q", rec.Body.String())
 	}
-	decodeResp(t, rec, &gen)
-	if gen.MagicLink == "" {
-		t.Fatal("missing magic link")
-	}
-	rec = do(t, h, http.MethodPost, "/api/auth/validate", jsonBody(t, map[string]string{
-		"link": gen.MagicLink, "user_id": "a@example.com",
-	}), map[string]string{"Content-Type": "application/json"})
-	if rec.Code != http.StatusOK {
-		t.Fatalf("validate: %d %s", rec.Code, rec.Body.String())
-	}
-	var val struct {
-		Valid bool `json:"valid"`
-	}
-	decodeResp(t, rec, &val)
-	if !val.Valid {
-		t.Fatal("link should be valid")
-	}
-}
-
-func TestPathTraversalViaAPI(t *testing.T) {
-	s := newTestSong(t)
-	h, silo := createDemoSilo(t, s)
-	for _, path := range []string{"../evil", ".song/meta.json", "a/../../x"} {
-		rec := do(t, h, http.MethodPost, "/api/song/silos/"+silo+"/file", strings.NewReader("path="+strings.ReplaceAll(path, "/", "%2F")+"&content=x"),
-			map[string]string{"Content-Type": "application/x-www-form-urlencoded"})
-		if rec.Code == http.StatusCreated {
-			t.Fatalf("traversal %q must be rejected", path)
-		}
-	}
-}
-
-func TestSeedDemo(t *testing.T) {
-	s := newTestSong(t)
-	h := s.Handler()
-	if err := SeedDemo(s); err != nil {
-		t.Fatal(err)
-	}
-	// Mobile index via header.
-	rec := do(t, h, http.MethodGet, "/demo/", nil, map[string]string{"X-Index-Variant": "mobile"})
-	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "mobile") {
-		t.Fatalf("seeded mobile index: %d %q", rec.Code, rec.Body.String())
-	}
-	// Template route.
-	rec = do(t, h, http.MethodGet, "/demo/about", nil, nil)
-	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "About song") {
-		t.Fatalf("seeded about route: %d %q", rec.Code, rec.Body.String())
-	}
-	// Encrypted file served decrypted.
-	rec = do(t, h, http.MethodGet, "/demo/secrets/notes.txt", nil, nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("seeded secret: %d %s", rec.Code, rec.Body.String())
-	}
-	if !strings.Contains(rec.Body.String(), "AES-256-GCM") {
-		t.Fatalf("secret not decrypted: %q", rec.Body.String())
-	}
-	// Re-seeding is idempotent.
-	if err := SeedDemo(s); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestRenderErrorsAreSurfaced(t *testing.T) {
-	s := newTestSong(t)
-	h, silo := createDemoSilo(t, s)
-	// Missing template -> 404 (no .templates dir yet).
-	rec := do(t, h, http.MethodPost, "/api/song/silos/"+silo+"/render", jsonBody(t, map[string]any{
-		"template": "nope", "data": map[string]any{},
-	}), map[string]string{"Content-Type": "application/json"})
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("missing templates should 404, got %d", rec.Code)
-	}
-}
-
-func TestUnknownEndpoints(t *testing.T) {
-	s := newTestSong(t)
-	h := s.Handler()
-	if rec := do(t, h, http.MethodGet, "/api/song/silos/nope/files", nil, nil); rec.Code != http.StatusNotFound {
-		t.Fatalf("missing silo: %d", rec.Code)
-	}
-	if rec := do(t, h, http.MethodGet, "/api/song/silos", nil, nil); rec.Code != http.StatusOK {
-		t.Fatalf("list: %d", rec.Code)
+	// Server side: {{template "host-chip" .}} resolves.
+	putFile(t, s, silo, ".templates/chip.html", `{{define "chip"}}{{template "host-chip" .name}}{{end}}`)
+	templateRoute(t, s, silo, "chip", "chip")
+	rec = do(t, h, http.MethodGet, "/"+silo+"/chip?name=Zed", nil, nil)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "<strong>Zed</strong>") {
+		t.Fatalf("host component SSR: %d %q", rec.Code, rec.Body.String())
 	}
 }
