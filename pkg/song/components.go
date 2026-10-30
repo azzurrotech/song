@@ -4,12 +4,14 @@ import (
 	"net/http"
 
 	"azzurrotech/song/pkg/component"
+	"azzurrotech/song/pkg/viewkit"
 )
 
 // handleComponents serves song's Web Components surfaces:
 //
 //	GET /_song/components.js  the baseline custom-element runtime (ES module)
 //	GET /_song/components     the registered tag definitions as JSON
+//	GET /_song/viewkit.js     the shared, DOM-free view decisions library
 //
 // The runtime is injected into (and only into) served HTML documents that use
 // a registered tag, so the system-defined tags are accessible from any
@@ -24,6 +26,8 @@ func (s *Song) handleComponents(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
 		w.Header().Set("Cache-Control", "public, max-age=3600")
 		_, _ = w.Write([]byte(component.Runtime()))
+	case viewkit.AssetPath:
+		viewkit.Serve(w)
 	case component.DefinitionsPath:
 		tags := s.components.Tags()
 		writeJSON(w, http.StatusOK, map[string]any{

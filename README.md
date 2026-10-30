@@ -43,6 +43,31 @@ Templates are processed automatically using Go's standard templating packages:
 
 Template definitions and their associated tags are registered in the system and made available to any HTML file, enabling reusable web components that can be instantiated across your application.
 
+### Shared view helpers (`viewkit`)
+
+`pkg/viewkit` embeds one dependency-free JavaScript library, served at
+`/_song/viewkit.js`, for the parts of a view that are decisions rather than
+markup. A page loads it once:
+
+```html
+<script src="/_song/viewkit.js" defer></script>
+```
+
+and gets `window.SongView`; Node's `require()` gets the same object, so the
+decisions are testable without a browser. It covers escaping, stable ids,
+relative time, the hash router, dashboard aggregation, the map projection and
+clustering, severity triage, reference counts — and the two helpers an
+annotation-heavy view needs:
+
+- `SongView.annotationSections(record, opts)` normalises a record's comments,
+  notes and links into one ordered list of renderable sections
+  (`{kind, title, count, items}`), resolving which end of a link is "the other
+  record" and whether the edge is incoming. A view maps sections to DOM; a new
+  record type only has to name its fields.
+- `SongView.timelineGroups(items)` splits a newest-first list into consecutive
+  day sections (`{day, label, items}`) without reordering it, so every timeline
+  uses the same grouping rule.
+
 ---
 
 ## Notes
