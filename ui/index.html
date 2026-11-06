@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>song — Static Hosting Dashboard</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: system-ui, sans-serif; max-width: 70rem; margin: 0 auto; padding: 1rem; line-height: 1.45; }
+  h1 { margin-bottom: 0; }
+  header p { margin-top: 0; color: #666; }
+  .endpoint { padding: .25rem .5rem; margin: .25rem 0; background: #f8f9fa; border-radius: .3rem; font-family: monospace; }
+  .version { color: #666; margin-bottom: 2rem; }
+  a { color: #2563eb; }
+</style>
+</head>
+<body>
+<header>
+  <h1>song</h1>
+  <p class="version">v2.0.0 — Static hosting with server-side template processing</p>
+</header>
+
+<h2>Available Routes</h2>
+<div>
+  <div class="endpoint">GET /_song/health — Health check</div>
+  <div class="endpoint">GET /_song/silos — List silos</div>
+  <div class="endpoint">GET /_song/components.js — Web Components runtime</div>
+  <div class="endpoint">GET /_song/components — Web Component definitions</div>
+  <div class="endpoint">GET /{silo}/<path> — Serve static resource</div>
+  <div class="endpoint">POST /{silo}/<path> — Upsert static resource</div>
+</div>
+
+<h2>Description</h2>
+<p>song is a static hosting server with server-side template processing and Web Component support. It serves resources from siloed directories under a root store.</p>
+
+<h2>Quick Start</h2>
+<pre>song --port 8080 --root ./data</pre>
+<p>Then visit <code>http://localhost:8080</code> to see this dashboard.</p>
+
+<footer style="margin-top: 2rem; font-size: .85rem; color: #666;">
+  Generated for song v2.0.0 · <a href="https://azzurrotech/song">azzurrotech/song</a>
+</footer>
+</body>
+</html>

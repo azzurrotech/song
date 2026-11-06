@@ -111,6 +111,8 @@ func (s *Song) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p := r.URL.Path
 		switch {
+		case p == "/_song/health" || p == "/_song/silos" || p == "/_song/components":
+			s.handleStatus(w, r)
 		case strings.HasPrefix(p, component.RuntimePathPrefix):
 			s.handleComponents(w, r)
 		default:
