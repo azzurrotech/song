@@ -33,6 +33,7 @@ See [`examples/middleware`](examples/middleware) for a complete example.
 
 - `GET /<path>` - Access static web resources served by song.
 - `POST /<path>` - Upsert (create or update) static web resources. The request body contains the resource content.
+- `POST /_song/silos` - Create a silo from `{"name":"<silo>"}` before upserting into it.
 
 ### Templates
 

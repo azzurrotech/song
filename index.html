@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>song — Static Hosting Dashboard</title>
+    <style>
+        :root { color-scheme: light dark; }
+        body { font-family: system-ui, sans-serif; max-width: 70rem; margin: 0 auto; padding: 1rem; line-height: 1.45; }
+        h1 { margin-bottom: 0; }
+        header p { margin-top: 0; color: #666; }
+        .endpoint { padding: .25rem .5rem; margin: .25rem 0; background: #f8f9fa; border-radius: .3rem; font-family: monospace; }
+        .version { color: #666; margin-bottom: 2rem; }
+        a { color: #2563eb; }
+        .upload-form { margin: 1rem 0; padding: 1rem; border: 1px solid #ddd; border-radius: .3rem; }
+        .upload-form input[type="file"] { margin: .5rem 0; }
+        .upload-form button { padding: .5rem 1rem; background: #2563eb; color: white; border: none; border-radius: .2rem; cursor: pointer; }
+        .upload-form button:hover { background: #1e40af; }
+        .file-list { margin: 1rem 0; }
+        .file-item { padding: .5rem; border-bottom: 1px solid #eee; }
+        .file-item:last-child { border-bottom: none; }
+        .delete-btn { color: #dc2626; cursor: pointer; text-decoration: underline; background: none; border: none; padding: 0; font: inherit; }
+        .delete-btn:hover { color: #b91c1c; }
+        .status { padding: .5rem; margin: .5rem 0; border-radius: .2rem; }
+        .status.success { background: #dcfce7; color: #166534; }
+        .status.error { background: #fee2e2; color: #991b1b; }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>song</h1>
+        <p class="version">v2.0.0 — Static hosting with server-side template processing</p>
+    </header>
+
+    <h2>Available Routes</h2>
+    <div>
+        <div class="endpoint">GET /_song/health — Health check</div>
+        <div class="endpoint">GET /_song/silos — List silos</div>
+        <div class="endpoint">GET /_song/components.js — Web Components runtime</div>
+        <div class="endpoint">GET /_song/components — Web Component definitions</div>
+        <div class="endpoint">GET /{silo}/ — Serve static resource</div>
+        <div class="endpoint">POST /{silo}/ — Upsert static resource</div>
+    </div>
+
+    <h2>File Browser</h2>
+    <div id="status-container"></div>
+    
+    <div class="upload-form">
+        <h3>Upload / Replace File</h3>
+        <form id="upload-form">
+            <input type="text" id="file-path" placeholder="Path (e.g., hello.txt or subdirectory/file.html)" required>
+            <br>
+            <input type="file" id="file-input" accept=".*">
+            <br>
+            <button type="submit">Upload / Replace</button>
+        </form>
+    </div>
+
+    <h3>Current Files</h3>
+    <div id="file-list" class="file-list">
+        <div class="file-item">Loading...</div>
+    </div>
+
+    <h2>Description</h2>
+    <p>song is a static hosting server with server-side template processing and Web Component support. It serves resources from siloed directories under a root store.</p>
+
+    <h2>Quick Start</h2>
+    <pre>song --port 8080 --root ./data</pre>
+    <p>Then visit <code>http://localhost:8080</code> to see this dashboard.</p>
+
+    <footer style="margin-top: 2rem; font-size: .85rem; color: #666;">
+        Generated for song v2.0.0 · <a href="https://azzurrotech/song">azzurrotech/song</a>
+    </footer>
+
+    <script src="/_song/viewkit.js" defer></script>
+    <script>
+        // Global SongView for decisions, testing and DOM manipulation
+        if (typeof window.SongView === "undefined") {
+            window.SongView = {};
+        }
+        
+        // Helper for status display
+        function showStatus(message, isSuccess) {
+            const container = document.getElementById("status-container");
+            const statusEl = document.createElement("div");
+            statusEl.className = `status ${isSuccess ? "success" : "error"}`;
+            statusEl.textContent = message;
+            container.insertBefore(statusEl, container.firstChild);
+            setTimeout(() => statusEl.remove(), 5000);
+        }
+        
+        // Load and display file list
+        async function loadFileList() {
+            const listEl = document.getElementById("file-list");
+            listEl.innerHTML = "<div class=\"file-item\">Loading...</div>";
+            
+            try {
+                const response = await fetch("/_song/silos");
+                if (!response.ok) throw new Error("Failed to fetch silos");
+                
+                const silos = await response.json();
+                if (silos.length === 0) {
+                    listEl.innerHTML = "<div class=\"file-item\">No silos found</div>";
+                    return;
+                }
+                
+                // Show first silo's files
+                const filesResponse = await fetch(`/${silos[0]}/");
+                if (!filesResponse.ok) throw new Error("Failed to fetch files");
+                
+                const files = await filesResponse.json();
+                if (files.length === 0) {
+                    listEl.innerHTML = "<div class=\"file-item\">No files in this silo</div>";
+                    return;
+                }
+                
+                let html = "";
+                files.forEach(file => {
+                    const isDir = file.is_dir;
+                    const icon = isDir ? "📁" : (file.name.endsWith(".html") || file.name.endsWith(".htm") ? "🌐" : "📄");
+                    html += `<div class="file-item">${icon} <strong>${file.name}</strong> (${file.size} bytes, ${file.modified})`;
+                    if (!isDir) {
+                        html += ` <button class="delete-btn" onclick="deleteFile('${file.path}')">Delete</button>`;
+                    }
+                    html += `</div>`;
+                });
+                listEl.innerHTML = html;
+            } catch (error) {
+                console.error("Error loading file list:", error);
+                listEl.innerHTML = `<div class="file-item">Error loading files: ${error.message}</div>`;
+            }
+        }
+        
+        // Delete file
+        async function deleteFile(path) {
+            if (!confirm(`Are you sure you want to delete ${path}?`)) return;
+            
+            try {
+                const response = await fetch(`/${path}`, { method: "DELETE" });
+                if (!response.ok) throw new Error("Failed to delete file");
+                
+                showStatus(`File ${path} deleted successfully`, true);
+                loadFileList();
+            } catch (error) {
+                showStatus(`Error deleting file: ${error.message}`, false);
+            }
+        }
+        
+        // Upload file
+        document.getElementById("upload-form").addEventListener("submit", async (e) => {
+            e.preventDefault();
+            
+            const fileInput = document.getElementById("file-input");
+            const filePath = document.getElementById("file-path").value;
+            const file = fileInput.files[0];
+            
+            if (!file) {
+                showStatus("Please select a file to upload", false);
+                return;
+            }
+            
+            try {
+                const formData = new FormData();
+                formData.append("file", file);
+                
+                const response = await fetch(`/${filePath}`, {
+                    method: "POST",
+                    body: formData
+                });
+                
+                if (!response.ok) {
+                    const errorText = await response.text();
+                    throw new Error(`Upload failed: ${errorText}`);
+                }
+                
+                const result = await response.json();
+                showStatus(`${filePath} uploaded successfully!`, true);
+                loadFileList();
+            } catch (error) {
+                showStatus(`Upload error: ${error.message}`, false);
+            }
+        });
+        
+        // Initialize on page load
+        document.addEventListener("DOMContentLoaded", () => {
+            loadFileList();
+        });
+    </script>
+</body>
+</html>

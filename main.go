@@ -25,7 +25,7 @@ func envOr(key, def string) string {
 }
 
 func main() {
-	port := flag.String("port", envOr("SONG_PORT", "8080"), "HTTP port to listen on")
+	port := flag.String("port", envOr("SONG_PORT", "8082"), "HTTP port to listen on")
 	root := flag.String("root", envOr("SONG_ROOT", "./data"), "root directory that holds the silos")
 	version := flag.Bool("version", false, "print version and exit")
 	help := flag.Bool("help", false, "show usage and exit")
@@ -37,7 +37,7 @@ func main() {
 Usage: song [options]
 
 Options:
-  --port   <n>    HTTP port to listen on             (default 8080)
+  --port   <n>    HTTP port to listen on             (default 8082)
   --root   <dir>  root directory that holds silos    (default ./data)
   --version       print the version and exit
   --help          show this help
@@ -45,6 +45,8 @@ Options:
 Routes (a silo is a directory directly under the store root):
   GET  /{silo}/<path>   serve a static resource; directories serve index.html
   POST /{silo}/<path>   upsert a static resource (body is the content)
+  GET  /_song/silos     list silos
+  POST /_song/silos     create a silo (body: {"name":"..."})
   /_song/components.js  baseline Web Components runtime
   /_song/components     registered Web Component tag definitions
 

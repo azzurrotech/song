@@ -2,6 +2,8 @@ package song
 
 import (
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -48,3 +50,39 @@ func TestStatusEndpoints(t *testing.T) {
 		t.Fatalf("health must reject POST: %d", rec.Code)
 	}
 }
+
+// TestCreateSiloEndpoint proves a fresh store can be populated over HTTP
+// without song hijacking a host application's unknown POST paths.
+func TestCreateSiloEndpoint(t *testing.T) {
+	s := newTestSong(t)
+	h := s.Handler()
+
+	rec := do(t, h, http.MethodPost, SilosPath, strings.NewReader(`{"name":"demo"}`), nil)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create silo: %d %q", rec.Code, rec.Body.String())
+	}
+	if !s.Store().HasSilo("demo") {
+		t.Fatal("silo was not created")
+	}
+
+	if rec := do(t, h, http.MethodPost, SilosPath, strings.NewReader(`{"name":"demo"}`), nil); rec.Code != http.StatusConflict {
+		t.Fatalf("duplicate silo: expected 409, got %d", rec.Code)
+	}
+	if rec := do(t, h, http.MethodPost, SilosPath, strings.NewReader(`{"name":""}`), nil); rec.Code != http.StatusBadRequest {
+		t.Fatalf("empty name: expected 400, got %d", rec.Code)
+	}
+	if rec := do(t, h, http.MethodPost, SilosPath, strings.NewReader(`{"name":"api"}`), nil); rec.Code != http.StatusBadRequest {
+		t.Fatalf("reserved name: expected 400, got %d", rec.Code)
+	}
+
+	// An unknown two-segment POST still belongs to the host, not to song.
+	next := &recordingHandler{}
+	s.Middleware(next).ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/login/submit", nil))
+	if !next.called {
+		t.Fatal("unknown POST path must fall through to next")
+	}
+}
+
+type recordingHandler struct{ called bool }
+
+func (h *recordingHandler) ServeHTTP(http.ResponseWriter, *http.Request) { h.called = true }

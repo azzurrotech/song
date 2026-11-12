@@ -60,7 +60,7 @@ Complete server-mode handler: `s.Middleware(http.NotFoundHandler())`.
 func (s *Song) Middleware(next http.Handler) http.Handler
 ```
 Serves the Web Component runtime (`/_song/...`) and any existing silo path; all
-other paths go to `next`.
+other paths go to `next`. Create a silo first with `POST /_song/silos`.
 
 ## Routes
 
@@ -68,12 +68,15 @@ other paths go to `next`.
 |---|---|
 | `/_song/components.js` | baseline Web Components runtime (GET, HEAD) |
 | `/_song/components` | registered tag definitions as JSON (GET, HEAD) |
+| `/_song/silos` | list silos (GET, HEAD) · create a silo from `{"name":"…"}` (POST) |
 | `/{silo}/<path>` | serve a static resource (GET, HEAD) |
 | `/{silo}/<path>` | upsert a static resource (POST) |
 
 `splitSiloPath` treats the first path segment as a silo unless it is empty or
 reserved (`api`, `admin`, `health`, `song`, `.song`, `_song`), and only if the
 store reports the silo exists; otherwise the request falls through to `next`.
+Create a silo explicitly with `POST /_song/silos` before upserting into it, so
+a host application keeps ownership of unknown paths.
 
 ## Serving a silo
 
